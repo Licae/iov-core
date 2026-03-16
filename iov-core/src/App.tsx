@@ -22,6 +22,8 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
+  Sun,
+  Moon,
   Terminal as TerminalIcon,
   BrainCircuit,
   Trash2,
@@ -205,6 +207,7 @@ export default function App() {
     pr_requires_sil: true
   });
   const [runningSuiteIds, setRunningSuiteIds] = useState<number[]>([]);
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 
   const filteredTestCases = testCases.filter(tc => {
     const matchesSearch = tc.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
@@ -212,6 +215,18 @@ export default function App() {
     const matchesProtocol = filterProtocol === 'All' || tc.protocol === filterProtocol;
     return matchesSearch && matchesProtocol;
   });
+
+  useEffect(() => {
+    const savedTheme = window.localStorage.getItem('iov-core-theme') as 'dark' | 'light' | null;
+    const preferredTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    const nextTheme = savedTheme || preferredTheme;
+    setTheme(nextTheme);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem('iov-core-theme', theme);
+  }, [theme]);
 
   useEffect(() => {
     fetchData();
@@ -636,6 +651,20 @@ export default function App() {
     reports: '分析报告',
   }[view];
 
+  const chartAccent = theme === 'dark' ? '#5544FF' : '#3156e8';
+  const chartAccentStrong = theme === 'dark' ? '#4433EE' : '#2446cb';
+  const chartGrid = theme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(148,163,184,0.28)';
+  const chartAxis = theme === 'dark' ? '#888888' : '#64748b';
+  const tooltipStyle = {
+    backgroundColor: theme === 'dark' ? 'rgba(17,17,17,0.96)' : 'rgba(255,255,255,0.96)',
+    border: `1px solid ${theme === 'dark' ? '#333333' : '#d9e0ee'}`,
+    borderRadius: '10px',
+    fontSize: '10px',
+    color: theme === 'dark' ? '#ffffff' : '#0f172a',
+    boxShadow: theme === 'dark' ? '0 18px 40px rgba(0,0,0,0.32)' : '0 18px 40px rgba(148,163,184,0.18)',
+  } as const;
+  const tooltipItemStyle = { color: theme === 'dark' ? '#ffffff' : '#0f172a' };
+
   const toggleSetting = async (key: string) => {
     const newValue = !settings[key];
     setSettings(prev => ({ ...prev, [key]: newValue }));
@@ -681,7 +710,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen bg-bg text-white overflow-hidden">
+    <div className="flex h-screen bg-bg text-text-primary overflow-hidden">
       {/* Sidebar */}
       <aside className="w-64 border-r border-border flex flex-col bg-bg z-20">
         <div className="p-8">
@@ -724,6 +753,29 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-6">
+            <div className="relative">
+              <div className="theme-toggle-glow" />
+              <div className="segmented-control">
+                <div
+                  className="segmented-thumb"
+                  style={{ transform: theme === 'dark' ? 'translateX(0)' : 'translateX(calc(100% + 4px))' }}
+                />
+                <button
+                  onClick={() => setTheme('dark')}
+                  className={`segmented-option ${theme === 'dark' ? 'is-active' : ''}`}
+                >
+                  <Moon size={14} />
+                  <span>深色</span>
+                </button>
+                <button
+                  onClick={() => setTheme('light')}
+                  className={`segmented-option ${theme === 'light' ? 'is-active' : ''}`}
+                >
+                  <Sun size={14} />
+                  <span>浅色</span>
+                </button>
+              </div>
+            </div>
             <div className="relative group">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted group-focus-within:text-accent transition-colors" size={16} />
               <input 
@@ -741,7 +793,7 @@ export default function App() {
             <button className="text-text-secondary hover:text-white transition-colors">
               <Bell size={20} />
             </button>
-            <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-accent to-[#AA44FF]" />
+            <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-accent to-sky-400" />
           </div>
         </header>
 
@@ -846,11 +898,11 @@ export default function App() {
                                   tc.status === 'Blocked' ? 'badge-warning' : 'badge-info'
                                 } bg-transparent border-none cursor-pointer focus:outline-none appearance-none`}
                               >
-                                <option value="Running" className="bg-[#111111]">Running</option>
-                                <option value="Passed" className="bg-[#111111]">Passed</option>
-                                <option value="Failed" className="bg-[#111111]">Failed</option>
-                                <option value="Blocked" className="bg-[#111111]">Blocked</option>
-                                <option value="Draft" className="bg-[#111111]">Draft</option>
+                                <option value="Running" className="bg-card">Running</option>
+                                <option value="Passed" className="bg-card">Passed</option>
+                                <option value="Failed" className="bg-card">Failed</option>
+                                <option value="Blocked" className="bg-card">Blocked</option>
+                                <option value="Draft" className="bg-card">Draft</option>
                               </select>
                             </td>
                             <td className="py-4 px-4">
@@ -907,27 +959,27 @@ export default function App() {
                         <AreaChart data={trendData}>
                           <defs>
                             <linearGradient id="colorRuns" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#4433EE" stopOpacity={0.3}/>
-                              <stop offset="95%" stopColor="#4433EE" stopOpacity={0}/>
+                              <stop offset="5%" stopColor={chartAccentStrong} stopOpacity={0.3}/>
+                              <stop offset="95%" stopColor={chartAccentStrong} stopOpacity={0}/>
                             </linearGradient>
                           </defs>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
+                          <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} vertical={false} />
                           <XAxis 
                             dataKey="date" 
                             axisLine={false} 
                             tickLine={false} 
-                            tick={{ fill: '#888', fontSize: 10 }} 
+                            tick={{ fill: chartAxis, fontSize: 10 }} 
                             dy={10}
                           />
                           <YAxis hide />
                           <Tooltip 
-                            contentStyle={{ backgroundColor: '#111', border: '1px solid #333', borderRadius: '8px', fontSize: '10px' }}
-                            itemStyle={{ color: '#fff' }}
+                            contentStyle={tooltipStyle}
+                            itemStyle={tooltipItemStyle}
                           />
                           <Area 
                             type="monotone" 
                             dataKey="runs" 
-                            stroke="#4433EE" 
+                            stroke={chartAccentStrong} 
                             fillOpacity={1} 
                             fill="url(#colorRuns)" 
                             strokeWidth={2}
@@ -1439,18 +1491,18 @@ export default function App() {
                       <AreaChart data={trendData}>
                         <defs>
                           <linearGradient id="colorPass" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#4433FF" stopOpacity={0.3}/>
-                            <stop offset="95%" stopColor="#4433FF" stopOpacity={0}/>
+                            <stop offset="5%" stopColor={chartAccent} stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor={chartAccent} stopOpacity={0}/>
                           </linearGradient>
                         </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
-                        <XAxis dataKey="date" stroke="#ffffff20" fontSize={10} tickLine={false} axisLine={false} />
-                        <YAxis stroke="#ffffff20" fontSize={10} tickLine={false} axisLine={false} />
+                        <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} vertical={false} />
+                        <XAxis dataKey="date" stroke={chartAxis} fontSize={10} tickLine={false} axisLine={false} />
+                        <YAxis stroke={chartAxis} fontSize={10} tickLine={false} axisLine={false} />
                         <Tooltip 
-                          contentStyle={{ backgroundColor: '#111', border: '1px solid #333', borderRadius: '8px', fontSize: '10px' }}
-                          itemStyle={{ color: '#4433FF' }}
+                          contentStyle={tooltipStyle}
+                          itemStyle={{ color: chartAccentStrong }}
                         />
-                        <Area type="monotone" dataKey="passRate" stroke="#4433FF" fillOpacity={1} fill="url(#colorPass)" strokeWidth={2} />
+                        <Area type="monotone" dataKey="passRate" stroke={chartAccent} fillOpacity={1} fill="url(#colorPass)" strokeWidth={2} />
                       </AreaChart>
                     </ResponsiveContainer>
                   </div>

@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-bg: #050505;
+  --color-card: #111111;
+  --color-border: #222222;
+  --color-text-primary: #FFFFFF;
+  --color-text-secondary: #888888;
+  --color-accent: #5544FF;
+  --color-muted: #444444;
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-danger: #EF4444;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  margin: 0;
+}
+
+.glass-card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+}
+
+.sidebar-item-active {
+  background: rgba(255, 255, 255, 0.05);
+  border-left: 3px solid var(--color-accent);
+}
+
+.stat-card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  @apply p-6 flex flex-col gap-2;
+}
+
+.table-header {
+  @apply text-[11px] uppercase tracking-wider text-text-secondary font-medium py-3 px-4 border-b border-border;
+}
+
+.table-row {
+  @apply border-b border-border hover:bg-white/5 transition-colors;
+}
+
+@utility badge {
+  @apply px-2 py-0.5 rounded-full text-[10px] font-bold uppercase;
+}
+
+.badge-success { @apply badge bg-success/20 text-success; }
+.badge-warning { @apply badge bg-warning/20 text-warning; }
+.badge-danger { @apply badge bg-danger/20 text-danger; }
+.badge-info { @apply badge bg-accent/20 text-accent; }

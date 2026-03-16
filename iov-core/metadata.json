@@ -1,0 +1,5 @@
+{
+  "name": "IOV-CORE",
+  "description": "Unified vehicle and component automation testing platform for ECU, T-Box, ADAS, and BMS safety validation.",
+  "requestFramePermissions": []
+}

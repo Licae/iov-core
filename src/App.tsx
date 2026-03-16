@@ -69,6 +69,24 @@ interface TestRun {
   executed_at: string;
 }
 
+interface RecentRun {
+  id: number;
+  test_case_id: number;
+  result: string;
+  logs: string;
+  duration: number;
+  executed_by: string;
+  executed_at: string;
+  test_case_title: string;
+  category: string;
+  protocol: string;
+  test_case_status: string;
+  task_id?: number | null;
+  task_type?: string | null;
+  task_status?: string | null;
+  asset_name?: string | null;
+}
+
 interface Stats {
   total: number;
   automated: number;
@@ -127,6 +145,35 @@ interface ExecutionTask {
   source_task_id?: number | null;
 }
 
+interface ExecutionTaskDetailItem {
+  id: number;
+  task_id: number;
+  test_case_id: number;
+  sort_order: number;
+  status: string;
+  result?: string | null;
+  run_id?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  title: string;
+  category?: string | null;
+  protocol?: string | null;
+  test_tool?: string | null;
+  test_input?: string | null;
+  expected_result?: string | null;
+  run_result?: string | null;
+  logs?: string | null;
+  duration?: number | null;
+  executed_at?: string | null;
+}
+
+interface ExecutionTaskDetail {
+  task: ExecutionTask;
+  items: ExecutionTaskDetailItem[];
+}
+
+const CASE_CATEGORY_OPTIONS = ['IVI', 'T-Box', 'Gateway', 'ADAS', 'BMS', 'OTA', '整车', '云控平台', '移动端', 'CAN总线'];
+
 // --- Components ---
 
 interface ToastProps {
@@ -173,7 +220,7 @@ const SidebarItem = ({ icon: Icon, label, active, badge, onClick }: { icon: any,
   </button>
 );
 
-const StatCard = ({ label, value, trend, icon: Icon, color }: { label: string, value: string | number, trend?: string, icon: any, color: string }) => (
+const StatCard = ({ label, value, trend, footnote, icon: Icon, color }: { label: string, value: string | number, trend?: string, footnote?: string, icon: any, color: string }) => (
   <div className="glass-card p-6 flex-1 min-w-[240px]">
     <div className="flex justify-between items-start mb-4">
       <div className="flex items-center gap-2">
@@ -189,7 +236,7 @@ const StatCard = ({ label, value, trend, icon: Icon, color }: { label: string, v
       {trend && <div className="text-[11px] text-success font-medium pb-1">{trend}</div>}
     </div>
     <div className="mt-4 text-[10px] text-text-secondary uppercase tracking-wider font-bold">
-      {label === '系统可靠性' ? '通过率 +1.2%' : label === '严重缺陷' ? '新增 1 条 DTC 记录' : label === '运行中仿真' ? 'HIL & SIL 测试执行中' : '已监控的 ECU 与车辆'}
+      {footnote || '实时统计'}
     </div>
   </div>
 );
@@ -207,6 +254,7 @@ export default function App() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showAssetModal, setShowAssetModal] = useState(false);
+  const [showEditAssetModal, setShowEditAssetModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showSuiteModal, setShowSuiteModal] = useState(false);
@@ -219,7 +267,11 @@ export default function App() {
   const [toasts, setToasts] = useState<{ id: string, message: string, type: 'success' | 'error' }[]>([]);
   const [selectedTestCase, setSelectedTestCase] = useState<TestCase | null>(null);
   const [selectedAsset, setSelectedAsset] = useState<any | null>(null);
+  const [selectedTaskDetail, setSelectedTaskDetail] = useState<ExecutionTaskDetail | null>(null);
+  const [isTaskDetailLoading, setIsTaskDetailLoading] = useState(false);
+  const [pingingAssetId, setPingingAssetId] = useState<number | null>(null);
   const [history, setHistory] = useState<TestRun[]>([]);
+  const [recentRuns, setRecentRuns] = useState<RecentRun[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [isRunningSimulation, setIsRunningSimulation] = useState(false);
   const [simulationLogs, setSimulationLogs] = useState<any[]>([]);
@@ -279,6 +331,9 @@ export default function App() {
         }
       } else if (data.type === 'EXECUTION_TASK_UPDATED' || data.type === 'EXECUTION_TASK_COMPLETED') {
         fetchData();
+        if (selectedTaskDetail?.task.id && data.task?.id === selectedTaskDetail.task.id) {
+          fetchTaskDetail(selectedTaskDetail.task.id, false);
+        }
         if (data.type === 'EXECUTION_TASK_COMPLETED') {
           addToast(data.task?.type === 'suite' ? '测试套件执行完成' : '测试任务执行完成', 'success');
         }
@@ -286,11 +341,11 @@ export default function App() {
     };
 
     return () => ws.close();
-  }, [selectedTestCase?.id]);
+  }, [selectedTestCase?.id, selectedTaskDetail?.task.id]);
 
   const fetchData = async () => {
     try {
-      const [casesRes, statsRes, trendRes, coverageRes, defectsRes, assetsRes, settingsRes, suitesRes, suiteRunsRes, tasksRes] = await Promise.all([
+      const [casesRes, statsRes, trendRes, coverageRes, defectsRes, assetsRes, settingsRes, suitesRes, suiteRunsRes, tasksRes, recentRunsRes] = await Promise.all([
         fetch('/api/test-cases'),
         fetch('/api/stats'),
         fetch('/api/stats/trend'),
@@ -300,7 +355,8 @@ export default function App() {
         fetch('/api/settings'),
         fetch('/api/test-suites'),
         fetch('/api/suite-runs'),
-        fetch('/api/tasks')
+        fetch('/api/tasks'),
+        fetch('/api/dashboard/recent-runs')
       ]);
       const cases = await casesRes.json();
       const statsData = await statsRes.json();
@@ -312,6 +368,7 @@ export default function App() {
       const suitesData = await suitesRes.json();
       const suiteRunsData = await suiteRunsRes.json();
       const tasksData = await tasksRes.json();
+      const recentRunsData = await recentRunsRes.json();
       setTestCases(cases);
       setStats(statsData);
       setTrendData(trend);
@@ -322,6 +379,7 @@ export default function App() {
       setTestSuites(suitesData);
       setSuiteRuns(suiteRunsData);
       setExecutionTasks(tasksData);
+      setRecentRuns(recentRunsData);
       setRunningSuiteIds(suiteRunsData.filter((run: SuiteRun) => run.status === 'Running' || run.status === 'Queued').map((run: SuiteRun) => run.suite_id));
     } catch (error) {
       console.error('Failed to fetch data:', error);
@@ -355,6 +413,26 @@ export default function App() {
       console.error('Failed to fetch history:', error);
     } finally {
       setIsHistoryLoading(false);
+    }
+  };
+
+  const fetchTaskDetail = async (taskId: number, openModal = true) => {
+    setIsTaskDetailLoading(true);
+    try {
+      const res = await fetch(`/api/tasks/${taskId}`);
+      if (!res.ok) {
+        throw new Error('Failed to fetch task detail');
+      }
+      const data = await res.json();
+      setSelectedTaskDetail(data);
+    } catch (error) {
+      console.error('Failed to fetch task detail:', error);
+      addToast('读取任务详情失败', 'error');
+      if (openModal) {
+        setSelectedTaskDetail(null);
+      }
+    } finally {
+      setIsTaskDetailLoading(false);
     }
   };
 
@@ -404,12 +482,43 @@ export default function App() {
     acc[defect.severity] = (acc[defect.severity] || 0) + 1;
     return acc;
   }, {} as Record<string, number>);
+  const totalRuns = stats?.results?.reduce((sum, item) => sum + Number(item.count || 0), 0) || 0;
+  const passedRuns = stats?.results?.find((item) => item.result === 'Passed')?.count || 0;
+  const reliability = totalRuns > 0 ? Math.round((passedRuns / totalRuns) * 100) : 0;
+  const latestTrend = trendData[trendData.length - 1];
+  const previousTrend = trendData[trendData.length - 2];
+  const reliabilityDelta = latestTrend && previousTrend
+    ? Number(latestTrend.passRate || 0) - Number(previousTrend.passRate || 0)
+    : 0;
+  const reliabilityTrendText = totalRuns > 0
+    ? `${reliabilityDelta >= 0 ? '通过率 +' : '通过率 '}${reliabilityDelta.toFixed(1)}%`
+    : undefined;
+  const severeDefectCount = Number(defectSummary.Critical || 0) + Number(defectSummary.Major || 0);
+  const assetCount = assets.length;
+  const dashboardDefectDistribution = [
+    { label: 'Critical', count: Number(defectSummary.Critical || 0), color: 'bg-danger' },
+    { label: 'Major', count: Number(defectSummary.Major || 0), color: 'bg-warning' },
+    { label: 'Minor', count: Number(defectSummary.Minor || 0), color: 'bg-accent' },
+  ];
+  const totalDashboardDefects = dashboardDefectDistribution.reduce((sum, item) => sum + item.count, 0);
 
-  const pingAsset = (name: string) => {
-    addToast(`正在 Ping 资产 ${name}...`, 'success');
-    setTimeout(() => {
-      addToast(`资产 ${name} 响应正常 (延迟: ${Math.floor(Math.random() * 50)}ms)`, 'success');
-    }, 1000);
+  const pingAsset = async (asset: any) => {
+    setPingingAssetId(asset.id);
+    addToast(`正在 Ping ${asset.name}...`, 'success');
+    try {
+      const res = await fetch(`/api/assets/${asset.id}/ping`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || data.output || 'Ping failed');
+      }
+      const latency = typeof data.latency_ms === 'number' ? `${data.latency_ms.toFixed(1)}ms` : '已响应';
+      addToast(`${asset.name} (${data.address}) 响应正常，延迟 ${latency}`, 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Ping 失败';
+      addToast(`${asset.name} Ping 失败: ${message}`, 'error');
+    } finally {
+      setPingingAssetId(null);
+    }
   };
 
   const updateFirmware = (name: string) => {
@@ -428,7 +537,10 @@ export default function App() {
       name: formData.get('name'),
       type: formData.get('type'),
       status: 'Online',
-      version: formData.get('version') || 'v1.0.0'
+      hardware_version: formData.get('hardware_version') || '-',
+      software_version: formData.get('software_version') || 'v1.0.0',
+      connection_address: formData.get('connection_address') || '',
+      description: formData.get('description') || '',
     };
 
     try {
@@ -441,6 +553,8 @@ export default function App() {
         addToast('资产注册成功', 'success');
         fetchData();
         setShowAssetModal(false);
+      } else {
+        addToast('资产注册失败', 'error');
       }
     } catch (error) {
       addToast('注册失败', 'error');
@@ -454,9 +568,46 @@ export default function App() {
         addToast('资产已删除', 'success');
         fetchData();
         setSelectedAsset(null);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        addToast(data.error || '删除失败', 'error');
       }
     } catch (error) {
       addToast('删除失败', 'error');
+    }
+  };
+
+  const editAsset = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!selectedAsset) return;
+    const formData = new FormData(e.currentTarget);
+    const assetData = {
+      name: formData.get('name'),
+      type: formData.get('type'),
+      status: formData.get('status'),
+      hardware_version: formData.get('hardware_version') || '-',
+      software_version: formData.get('software_version') || 'v1.0.0',
+      connection_address: formData.get('connection_address') || '',
+      description: formData.get('description') || '',
+    };
+
+    try {
+      const res = await fetch(`/api/assets/${selectedAsset.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(assetData),
+      });
+      if (res.ok) {
+        addToast('资产已更新', 'success');
+        await fetchData();
+        setSelectedAsset((prev: any) => prev ? { ...prev, ...assetData } : prev);
+        setShowEditAssetModal(false);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        addToast(data.error || '更新资产失败', 'error');
+      }
+    } catch (error) {
+      addToast('更新资产失败', 'error');
     }
   };
 
@@ -563,6 +714,20 @@ export default function App() {
     const cases = dataLines.map(line => {
       const parts = line.split('|').map(p => p.trim()).filter(p => p !== '');
       if (parts.length < 7) return null;
+      if (parts.length >= 9) {
+        return {
+          category: parts[0],
+          title: parts[1],
+          protocol: parts[2],
+          type: parts[3],
+          test_input: parts[4],
+          test_tool: parts[5],
+          steps: parts[6],
+          expected_result: parts[7],
+          automation_level: parts[8],
+          description: parts[9] || '',
+        };
+      }
       return {
         category: parts[0],
         title: parts[1],
@@ -727,6 +892,7 @@ export default function App() {
   } as const;
   const tooltipItemStyle = { color: theme === 'dark' ? '#ffffff' : '#0f172a' };
   const activeExecutionTasks = executionTasks.filter(task => task.status === 'Running' || task.status === 'Queued');
+  const runningTaskCount = activeExecutionTasks.length;
 
   const toggleSetting = async (key: string) => {
     const newValue = !settings[key];
@@ -894,10 +1060,35 @@ export default function App() {
 
               {/* Stats Grid */}
               <div className="flex gap-6 overflow-x-auto pb-2">
-                <StatCard label="系统可靠性" value="94%" trend="通过率 +1.2%" icon={ShieldCheck} color="bg-success" />
-                <StatCard label="严重缺陷" value="3" icon={AlertTriangle} color="bg-danger" />
-                <StatCard label="运行中仿真" value="2" icon={Activity} color="bg-accent" />
-                <StatCard label="测试资产总数" value="142" icon={Database} color="bg-text-secondary" />
+                <StatCard
+                  label="系统可靠性"
+                  value={`${reliability}%`}
+                  trend={reliabilityTrendText}
+                  footnote={totalRuns > 0 ? `基于 ${totalRuns} 次真实执行结果` : '暂无真实执行数据'}
+                  icon={ShieldCheck}
+                  color="bg-success"
+                />
+                <StatCard
+                  label="严重缺陷"
+                  value={severeDefectCount}
+                  footnote={severeDefectCount > 0 ? `Critical + Major 共 ${severeDefectCount} 条` : '当前无高优先级缺陷'}
+                  icon={AlertTriangle}
+                  color="bg-danger"
+                />
+                <StatCard
+                  label="运行中仿真"
+                  value={runningTaskCount}
+                  footnote={runningTaskCount > 0 ? '当前队列存在运行中或排队任务' : '当前没有活动中的测试任务'}
+                  icon={Activity}
+                  color="bg-accent"
+                />
+                <StatCard
+                  label="测试资产总数"
+                  value={assetCount}
+                  footnote={assetCount > 0 ? `已登记 ${assetCount} 个真实测试资产` : '当前尚未登记测试资产'}
+                  icon={Database}
+                  color="bg-text-secondary"
+                />
               </div>
 
               {/* Main Dashboard Layout */}
@@ -922,54 +1113,51 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="text-sm">
-                        {filteredTestCases.length === 0 ? (
+                        {recentRuns.length === 0 ? (
                           <tr>
                             <td colSpan={5} className="py-12 text-center text-muted italic">未找到匹配的测试用例</td>
                           </tr>
                         ) : (
-                          filteredTestCases.map((tc, i) => (
+                          recentRuns.map((run) => (
                             <tr 
-                              key={tc.id} 
+                              key={run.id} 
                               onClick={() => {
-                                setSelectedTestCase(tc);
-                                fetchHistory(tc.id);
+                                const matchedCase = testCases.find((tc) => tc.id === run.test_case_id);
+                                if (matchedCase) {
+                                  setSelectedTestCase(matchedCase);
+                                  fetchHistory(matchedCase.id);
+                                }
                               }}
-                              className={`table-row cursor-pointer transition-opacity ${updatingIds.includes(tc.id) ? 'opacity-50 pointer-events-none' : ''}`}
+                              className="table-row cursor-pointer transition-opacity"
                             >
                             <td className="py-4 px-4">
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded bg-white/5 flex items-center justify-center">
-                                  {tc.category === 'T-Box' ? <Cpu size={16} className="text-text-secondary" /> : <Car size={16} className="text-text-secondary" />}
+                                  {run.category === 'T-Box' || run.category === 'IVI' || run.category === 'Gateway'
+                                    ? <Cpu size={16} className="text-text-secondary" />
+                                    : <Car size={16} className="text-text-secondary" />}
                                 </div>
                                 <div>
-                                  <div className="font-bold">{tc.title.split(' ')[0]}</div>
-                                  <div className="text-[10px] text-muted uppercase">{tc.category} ({tc.protocol})</div>
+                                  <div className="font-bold">{run.asset_name || run.test_case_title}</div>
+                                  <div className="text-[10px] text-muted uppercase">{run.category} ({run.protocol})</div>
                                 </div>
                               </div>
                             </td>
                             <td className="py-4 px-4">
-                              <div className="text-xs">{tc.protocol} 总线压力测试</div>
+                              <div className="text-xs">{run.test_case_title}</div>
                             </td>
                             <td className="py-4 px-4">
-                              <select 
-                                value={tc.status} 
-                                onChange={(e) => updateTestCaseStatus(tc.id, e.target.value)}
-                                className={`badge ${
-                                  tc.status === 'Running' ? 'badge-info' : 
-                                  tc.status === 'Passed' ? 'badge-success' : 
-                                  tc.status === 'Failed' ? 'badge-danger' : 
-                                  tc.status === 'Blocked' ? 'badge-warning' : 'badge-info'
-                                } bg-transparent border-none cursor-pointer focus:outline-none appearance-none`}
-                              >
-                                <option value="Running" className="bg-card">Running</option>
-                                <option value="Passed" className="bg-card">Passed</option>
-                                <option value="Failed" className="bg-card">Failed</option>
-                                <option value="Blocked" className="bg-card">Blocked</option>
-                                <option value="Draft" className="bg-card">Draft</option>
-                              </select>
+                              <span className={`badge ${
+                                (run.task_status || run.test_case_status) === 'Running' ? 'badge-info' :
+                                (run.task_status || run.test_case_status) === 'Passed' || run.result === 'Passed' ? 'badge-success' :
+                                (run.task_status || run.test_case_status) === 'Failed' || run.result === 'Failed' ? 'badge-danger' :
+                                (run.task_status || run.test_case_status) === 'Blocked' ? 'badge-warning' : 'badge-info'
+                              }`}>
+                                {run.task_status || run.test_case_status || 'Completed'}
+                              </span>
                             </td>
                             <td className="py-4 px-4">
-                              {tc.status === 'Running' ? (
+                              {run.result === 'Running' || run.task_status === 'Running' ? (
                                 <div className="flex items-center gap-2 text-accent">
                                   <motion.div
                                     animate={{ rotate: 360 }}
@@ -979,17 +1167,17 @@ export default function App() {
                                   </motion.div>
                                   <span className="text-[10px] font-bold">执行中...</span>
                                 </div>
-                              ) : tc.status === 'Failed' ? (
+                              ) : run.result === 'Failed' ? (
                                 <div className="flex items-center gap-2 text-danger">
                                   <AlertTriangle size={12} />
-                                  <span className="font-bold text-[10px]">1 严重缺陷</span>
+                                  <span className="font-bold text-[10px]">执行失败</span>
                                 </div>
-                              ) : tc.status === 'Passed' ? (
+                              ) : run.result === 'Passed' ? (
                                 <div className="flex items-center gap-2 text-success">
                                   <ShieldCheck size={12} />
                                   <span className="font-bold text-[10px]">全部通过</span>
                                 </div>
-                              ) : tc.status === 'Blocked' ? (
+                              ) : run.result === 'Blocked' ? (
                                 <div className="flex items-center gap-2 text-warning">
                                   <Clock size={12} />
                                   <span className="font-bold text-[10px]">已阻塞</span>
@@ -999,9 +1187,7 @@ export default function App() {
                               )}
                             </td>
                             <td className="py-4 px-4 text-text-secondary font-mono text-xs">
-                              {(() => {
-                                return formatDuration(tc.id === 1 ? 765 : tc.id === 2 ? 192 : tc.id === 3 ? 485 : tc.id === 4 ? 320 : 0);
-                              })()}
+                              {formatDuration(run.duration)}
                             </td>
                           </tr>
                         )))}
@@ -1058,12 +1244,7 @@ export default function App() {
                       <MoreHorizontal size={18} className="text-muted" />
                     </div>
                   <div className="space-y-6">
-                    {[
-                      { label: '严重', count: 3, color: 'bg-danger', total: 50 },
-                      { label: '高危', count: 14, color: 'bg-orange-500', total: 50 },
-                      { label: '中危', count: 28, color: 'bg-warning', total: 50 },
-                      { label: '低危', count: 42, color: 'bg-slate-500', total: 50 },
-                    ].map((item, i) => (
+                    {dashboardDefectDistribution.map((item, i) => (
                       <div key={i} className="space-y-2">
                         <div className="flex justify-between text-xs font-bold">
                           <div className="flex items-center gap-2">
@@ -1075,7 +1256,7 @@ export default function App() {
                         <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
                           <motion.div 
                             initial={{ width: 0 }}
-                            animate={{ width: `${(item.count / 50) * 100}%` }}
+                            animate={{ width: `${totalDashboardDefects > 0 ? (item.count / totalDashboardDefects) * 100 : 0}%` }}
                             transition={{ duration: 1, delay: i * 0.1 }}
                             className={`h-full ${item.color}`}
                           />
@@ -1083,7 +1264,7 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-                  <button className="w-full mt-8 bg-card border border-border py-2 rounded-lg text-xs font-bold hover:bg-border transition-colors">
+                  <button onClick={() => setView('defects')} className="w-full mt-8 bg-card border border-border py-2 rounded-lg text-xs font-bold hover:bg-border transition-colors">
                     查看诊断报告
                   </button>
                 </div>
@@ -1170,6 +1351,7 @@ export default function App() {
                       <th className="px-6 py-4 text-[10px] font-bold uppercase text-muted tracking-widest w-16">序号</th>
                       <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest">类别</th>
                       <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest">名称</th>
+                      <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest">预期结果</th>
                       <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest">工具</th>
                       <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest">自动化</th>
                       <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest text-right">操作</th>
@@ -1194,7 +1376,10 @@ export default function App() {
                         </td>
                         <td className="px-8 py-4">
                           <div className="font-bold text-sm">{tc.title}</div>
-                          <div className="text-[10px] text-muted truncate max-w-xs">{tc.expected_result}</div>
+                          <div className="text-[10px] text-muted truncate max-w-xs">{tc.protocol} • {tc.type}</div>
+                        </td>
+                        <td className="px-8 py-4 text-xs text-text-secondary max-w-sm">
+                          <div className="line-clamp-2">{tc.expected_result || '-'}</div>
                         </td>
                         <td className="px-8 py-4 text-xs font-mono text-accent">{tc.test_tool || '-'}</td>
                         <td className="px-8 py-4">
@@ -1389,6 +1574,12 @@ export default function App() {
                         ) : null}
                       </div>
                       <div className="flex gap-2">
+                        <button
+                          onClick={() => fetchTaskDetail(task.id)}
+                          className="px-3 py-2 rounded-lg border border-border text-text-secondary text-[10px] font-bold uppercase"
+                        >
+                          详情
+                        </button>
                         {(task.status === 'Running' || task.status === 'Queued') ? (
                           <button
                             onClick={() => cancelTask(task.id)}
@@ -1441,12 +1632,20 @@ export default function App() {
                             <h4 className="font-bold text-lg">{title || `任务 #${task.id}`}</h4>
                             <p className="text-xs text-muted uppercase font-bold tracking-wider">{task.status} • 进度 {progress}%</p>
                           </div>
-                          <button
-                            onClick={() => retryTask(task.id)}
-                            className="px-3 py-2 rounded-lg border border-accent/30 text-accent text-[10px] font-bold uppercase"
-                          >
-                            重新执行
-                          </button>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => fetchTaskDetail(task.id)}
+                              className="px-3 py-2 rounded-lg border border-border text-text-secondary text-[10px] font-bold uppercase"
+                            >
+                              详情
+                            </button>
+                            <button
+                              onClick={() => retryTask(task.id)}
+                              className="px-3 py-2 rounded-lg border border-accent/30 text-accent text-[10px] font-bold uppercase"
+                            >
+                              重新执行
+                            </button>
+                          </div>
                         </div>
                         <div className="flex items-center gap-4 text-[10px] text-muted font-mono">
                           <span>执行器: {task.executor || 'simulate'}</span>
@@ -1686,20 +1885,32 @@ export default function App() {
                       <h4 className="font-bold">{asset.name}</h4>
                       <p className="text-[10px] text-muted uppercase font-bold">{asset.type}</p>
                     </div>
-                    <div className="pt-4 border-t border-border flex justify-between items-center">
-                      <span className="text-[10px] text-muted font-mono">FW: {asset.version}</span>
+                    <div className="space-y-2 pt-4 border-t border-border">
+                      <div className="flex justify-between items-center text-[10px] text-muted font-mono">
+                        <span>HW: {asset.hardware_version || '-'}</span>
+                        <span>SW: {asset.software_version || '-'}</span>
+                      </div>
+                      {asset.description ? (
+                        <p className="text-[10px] text-text-secondary line-clamp-2">{asset.description}</p>
+                      ) : null}
                       <div className="flex gap-2">
                         <button 
-                          onClick={(e) => { e.stopPropagation(); pingAsset(asset.name); }}
+                          onClick={(e) => { e.stopPropagation(); pingAsset(asset); }}
                           className="text-accent hover:underline text-[10px] font-bold uppercase"
                         >
-                          Ping
+                          {pingingAssetId === asset.id ? 'Ping中' : 'Ping'}
                         </button>
                         <button 
                           onClick={(e) => { e.stopPropagation(); updateFirmware(asset.name); }}
                           className="text-accent hover:underline text-[10px] font-bold uppercase"
                         >
                           升级
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteAsset(asset.id); }}
+                          className="text-danger hover:underline text-[10px] font-bold uppercase"
+                        >
+                          删除
                         </button>
                       </div>
                     </div>
@@ -1738,16 +1949,13 @@ export default function App() {
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试资产 (分类)</label>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">目标模块 / 业务域</label>
                     <select name="category" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="T-Box">T-Box</option>
-                      <option value="ADAS">ADAS</option>
-                      <option value="BMS">BMS</option>
-                      <option value="整车">整车</option>
-                      <option value="Gateway">Gateway</option>
-                      <option value="OTA升级">OTA升级</option>
-                      <option value="CAN总线">CAN总线</option>
+                      {CASE_CATEGORY_OPTIONS.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
                     </select>
+                    <div className="text-[10px] text-muted mt-1">用于检索、分组和套件编排，不直接绑定执行资产。</div>
                   </div>
                   <div>
                     <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试协议</label>
@@ -1862,7 +2070,7 @@ export default function App() {
                     <span className="text-xs font-bold uppercase tracking-wider">任务预检</span>
                   </div>
                   <p className="text-[10px] text-muted leading-relaxed">
-                    发起任务后，系统将自动加载仿真脚本并建立与目标 ECU 的通信链路。预计耗时 2-5 分钟。
+                    发起任务后，系统会按用例匹配执行适配器并加载对应脚本/安全检查逻辑，再与目标资产建立执行链路。
                   </p>
                 </div>
 
@@ -1970,12 +2178,12 @@ export default function App() {
               </div>
 
               <div className="space-y-4">
-                <p className="text-xs text-muted">请粘贴 Markdown 表格内容（包含表头）：</p>
+                <p className="text-xs text-muted">请粘贴 Markdown 表格内容。推荐列顺序与新建表单保持一致：</p>
                 <textarea 
                   value={importText}
                   onChange={(e) => setImportText(e.target.value)}
                   className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none h-64 scrollbar-hide"
-                  placeholder="| 测试类别 | 测试项名称 | 测试输入 | 测试工具 | 测试步骤 | 预期结果 | 自动化等级 |&#10;| --- | --- | --- | --- | --- | --- | --- |&#10;| OTA升级 | 升级包完整性校验 | ... |"
+                  placeholder="| 目标模块/业务域 | 用例名称 | 测试协议 | 测试类型 | 测试输入 | 测试工具 | 测试步骤 | 预期结果 | 自动化等级 | 描述 |&#10;| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |&#10;| IVI | SSH访问控制验证 | Ethernet | Automated | 白名单IP/非法IP | SSH | 步骤1\\n步骤2 | 仅授权账号允许登录 | A | 验证IVI SSH访问控制 |"
                 />
                 <div className="flex gap-3 pt-4">
                   <button 
@@ -2022,16 +2230,13 @@ export default function App() {
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试资产 (分类)</label>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">目标模块 / 业务域</label>
                     <select name="category" defaultValue={selectedTestCase.category} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="T-Box">T-Box</option>
-                      <option value="ADAS">ADAS</option>
-                      <option value="BMS">BMS</option>
-                      <option value="整车">整车</option>
-                      <option value="Gateway">Gateway</option>
-                      <option value="OTA升级">OTA升级</option>
-                      <option value="CAN总线">CAN总线</option>
+                      {CASE_CATEGORY_OPTIONS.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
                     </select>
+                    <div className="text-[10px] text-muted mt-1">只表示测试覆盖对象或业务域，不等于具体执行资产。</div>
                   </div>
                   <div>
                     <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试协议</label>
@@ -2114,7 +2319,7 @@ export default function App() {
                   <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">资产名称</label>
                   <input name="name" required type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="例如：GW-02 (Gateway)" />
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-3 gap-4">
                   <div>
                     <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">资产类型</label>
                     <select name="type" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
@@ -2124,10 +2329,23 @@ export default function App() {
                     </select>
                   </div>
                   <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">固件版本</label>
-                    <input name="version" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="v1.0.0" />
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">硬件版本</label>
+                    <input name="hardware_version" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="HW-A1" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">软件版本</label>
+                    <input name="software_version" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="v1.0.0" />
                   </div>
                 </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">连接地址</label>
+                  <input name="connection_address" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="例如：192.168.1.10 或 ivi-demo.local" />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">描述</label>
+                  <textarea name="description" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none h-20" placeholder="例如：IVI 主机样件，当前用于 SSH 访问控制与升级流程验证" />
+                </div>
+                <div className="text-[10px] text-muted">资产先记录基础识别信息和描述。功能点如果后面要参与调度或能力匹配，再单独建模会更合适。</div>
                 <button type="submit" className="w-full bg-accent py-3 rounded-lg text-xs font-bold uppercase mt-4 hover:bg-[#4433EE] transition-colors">
                   确认注册
                 </button>
@@ -2162,17 +2380,33 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="space-y-6">
-                <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-6">
+                <div className="grid grid-cols-3 gap-4">
                   <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">固件版本</div>
-                    <div className="font-mono text-sm">{selectedAsset.version}</div>
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">硬件版本</div>
+                    <div className="font-mono text-sm">{selectedAsset.hardware_version || '-'}</div>
+                  </div>
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">软件版本</div>
+                    <div className="font-mono text-sm">{selectedAsset.software_version || '-'}</div>
                   </div>
                   <div className="p-4 rounded-xl bg-white/2 border border-border">
                     <div className="text-[10px] text-muted uppercase font-bold mb-1">最后同步</div>
                     <div className="text-sm">刚刚</div>
                   </div>
                 </div>
+
+                <div className="p-4 rounded-xl bg-white/2 border border-border">
+                  <div className="text-[10px] text-muted uppercase font-bold mb-1">连接地址</div>
+                  <div className="font-mono text-sm">{selectedAsset.connection_address || '未配置'}</div>
+                </div>
+
+                {selectedAsset.description ? (
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-2">资产描述</div>
+                    <div className="text-sm text-text-secondary leading-relaxed">{selectedAsset.description}</div>
+                  </div>
+                ) : null}
 
                 <div className="space-y-3">
                   <h4 className="text-xs uppercase font-bold text-muted tracking-widest">实时健康指标</h4>
@@ -2199,6 +2433,12 @@ export default function App() {
                 </div>
 
                 <div className="flex gap-3 pt-4">
+                  <button
+                    onClick={() => setShowEditAssetModal(true)}
+                    className="flex-1 py-3 rounded-xl border border-accent/30 text-accent font-bold text-xs uppercase hover:bg-accent/5 transition-colors"
+                  >
+                    编辑资产
+                  </button>
                   <button 
                     onClick={() => deleteAsset(selectedAsset.id)}
                     className="flex-1 py-3 rounded-xl border border-danger/30 text-danger font-bold text-xs uppercase hover:bg-danger/5 transition-colors"
@@ -2206,10 +2446,10 @@ export default function App() {
                     删除资产
                   </button>
                   <button 
-                    onClick={() => pingAsset(selectedAsset.name)}
+                    onClick={() => pingAsset(selectedAsset)}
                     className="flex-1 py-3 rounded-xl border border-border font-bold text-xs uppercase hover:bg-white/5 transition-colors"
                   >
-                    Ping 测试
+                    {pingingAssetId === selectedAsset.id ? 'Ping 中...' : 'Ping 测试'}
                   </button>
                   <button 
                     onClick={() => updateFirmware(selectedAsset.name)}
@@ -2225,6 +2465,73 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Edit Asset Modal */}
+      <AnimatePresence>
+        {showEditAssetModal && selectedAsset && (
+          <div className="fixed inset-0 z-[55] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="glass-card w-full max-w-md p-8 bg-card"
+            >
+              <div className="flex justify-between items-start mb-6">
+                <h3 className="text-xl font-bold tracking-tighter uppercase">编辑资产</h3>
+                <button onClick={() => setShowEditAssetModal(false)} className="text-muted hover:text-white">
+                  <XCircle size={24} />
+                </button>
+              </div>
+
+              <form onSubmit={editAsset} className="space-y-4">
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">资产名称</label>
+                  <input name="name" required defaultValue={selectedAsset.name} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">资产类型</label>
+                    <select name="type" defaultValue={selectedAsset.type} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
+                      <option value="Hardware">硬件 (Hardware)</option>
+                      <option value="Simulation">仿真 (Simulation)</option>
+                      <option value="Prototype">原型车 (Prototype)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">状态</label>
+                    <select name="status" defaultValue={selectedAsset.status} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
+                      <option value="Online">Online</option>
+                      <option value="Offline">Offline</option>
+                      <option value="Busy">Busy</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">硬件版本</label>
+                    <input name="hardware_version" defaultValue={selectedAsset.hardware_version || ''} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">软件版本</label>
+                    <input name="software_version" defaultValue={selectedAsset.software_version || ''} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">连接地址</label>
+                  <input name="connection_address" defaultValue={selectedAsset.connection_address || ''} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">描述</label>
+                  <textarea name="description" defaultValue={selectedAsset.description || ''} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none h-20" />
+                </div>
+                <button type="submit" className="w-full bg-accent py-3 rounded-lg text-xs font-bold uppercase hover:bg-[#4433EE] transition-colors">
+                  保存修改
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Toasts */}
       <AnimatePresence>
         {toasts.map(toast => (
@@ -2235,6 +2542,135 @@ export default function App() {
             onClose={() => setToasts(prev => prev.filter(t => t.id !== toast.id))} 
           />
         ))}
+      </AnimatePresence>
+
+      {/* Task Detail Modal */}
+      <AnimatePresence>
+        {selectedTaskDetail && (
+          <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              className="glass-card w-full max-w-4xl max-h-[88vh] overflow-hidden bg-card"
+            >
+              <div className="flex items-start justify-between p-6 border-b border-border">
+                <div>
+                  <h3 className="text-xl font-bold tracking-tighter uppercase">
+                    {selectedTaskDetail.task.type === 'suite' ? selectedTaskDetail.task.suite_name : selectedTaskDetail.task.test_case_title || `任务 #${selectedTaskDetail.task.id}`}
+                  </h3>
+                  <p className="text-[10px] text-muted uppercase font-bold tracking-widest mt-2">
+                    任务 #{selectedTaskDetail.task.id} • {selectedTaskDetail.task.type === 'suite' ? '套件任务' : '单用例任务'} • {selectedTaskDetail.task.executor || 'simulate'}
+                  </p>
+                </div>
+                <button onClick={() => setSelectedTaskDetail(null)} className="text-muted hover:text-white">
+                  <XCircle size={24} />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-6 overflow-y-auto max-h-[calc(88vh-88px)]">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">任务状态</div>
+                    <div className="font-bold text-sm">{selectedTaskDetail.task.status}</div>
+                  </div>
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">执行资产</div>
+                    <div className="font-bold text-sm">{selectedTaskDetail.task.asset_name || '未绑定资产'}</div>
+                  </div>
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">执行策略</div>
+                    <div className="font-bold text-sm">{selectedTaskDetail.task.stop_on_failure ? '失败即停' : '全部执行'}</div>
+                  </div>
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">重试次数</div>
+                    <div className="font-bold text-sm">{selectedTaskDetail.task.retry_count || 0}</div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">开始时间</div>
+                    <div>{selectedTaskDetail.task.started_at ? new Date(selectedTaskDetail.task.started_at).toLocaleString() : '-'}</div>
+                  </div>
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">结束时间</div>
+                    <div>{selectedTaskDetail.task.finished_at ? new Date(selectedTaskDetail.task.finished_at).toLocaleString() : '-'}</div>
+                  </div>
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">通过/失败</div>
+                    <div>{selectedTaskDetail.task.passed_items}/{selectedTaskDetail.task.failed_items}</div>
+                  </div>
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">当前项</div>
+                    <div>{selectedTaskDetail.task.current_case_title || selectedTaskDetail.task.current_item_label || '已结束'}</div>
+                  </div>
+                </div>
+
+                {selectedTaskDetail.task.error_message && (
+                  <div className="rounded-xl border border-danger/20 bg-danger/5 p-4">
+                    <div className="text-[10px] text-danger uppercase font-bold mb-1">失败原因</div>
+                    <div className="text-sm text-danger">{selectedTaskDetail.task.error_message}</div>
+                  </div>
+                )}
+
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">执行明细</h4>
+                    {isTaskDetailLoading && <Activity size={14} className="animate-spin text-accent" />}
+                  </div>
+
+                  <div className="space-y-3">
+                    {selectedTaskDetail.items.map((item) => (
+                      <div key={item.id} className="rounded-2xl border border-border bg-white/2 p-4 space-y-3">
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <div className="font-bold text-sm">{item.sort_order + 1}. {item.title}</div>
+                            <div className="text-[10px] text-muted uppercase font-bold mt-1">
+                              {item.category || '未分类'} • {item.protocol || '未标记协议'} • {item.test_tool || '未指定工具'}
+                            </div>
+                          </div>
+                          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
+                            (item.result || item.run_result) === 'Passed' ? 'bg-success/20 text-success' :
+                            (item.result || item.run_result) === 'Failed' ? 'bg-danger/20 text-danger' :
+                            item.status === 'Running' ? 'bg-accent/20 text-accent' :
+                            'bg-white/5 text-muted'
+                          }`}>
+                            {item.result || item.run_result || item.status}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                          <div className="rounded-xl border border-border bg-white/2 p-3">
+                            <div className="text-[10px] text-muted uppercase font-bold mb-1">预期结果</div>
+                            <div className="text-text-secondary">{item.expected_result || '-'}</div>
+                          </div>
+                          <div className="rounded-xl border border-border bg-white/2 p-3">
+                            <div className="text-[10px] text-muted uppercase font-bold mb-1">测试输入</div>
+                            <div className="text-text-secondary font-mono break-all">{item.test_input || '-'}</div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-3 text-[10px] text-muted font-mono">
+                          <div>开始: {item.started_at ? new Date(item.started_at).toLocaleString() : '-'}</div>
+                          <div>结束: {item.finished_at ? new Date(item.finished_at).toLocaleString() : '-'}</div>
+                          <div>耗时: {item.duration ? formatDuration(item.duration) : '--'}</div>
+                        </div>
+
+                        <div className="rounded-xl border border-border bg-black/20 p-3">
+                          <div className="text-[10px] text-muted uppercase font-bold mb-2">执行日志</div>
+                          <pre className="text-[11px] leading-relaxed whitespace-pre-wrap break-words text-text-secondary">
+                            {item.logs || '当前任务没有返回日志。若是刚启动，请等待执行器回传结果。'}
+                          </pre>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
       </AnimatePresence>
 
       {/* Detail Drawer */}

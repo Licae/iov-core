@@ -7,10 +7,13 @@ import http from "http";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import os from "os";
 
 dotenv.config();
 
 const db = new Database("v2x_testing.db");
+const ENABLE_DEMO_SEED = process.env.ENABLE_DEMO_SEED === "true";
 
 type DefectRecord = {
   id: string;
@@ -58,6 +61,11 @@ type ExecutionTaskItemRecord = {
   sort_order: number;
   title: string;
   protocol?: string | null;
+  category?: string | null;
+  description?: string | null;
+  test_input?: string | null;
+  test_tool?: string | null;
+  expected_result?: string | null;
 };
 
 type ExecutorResult = {
@@ -73,8 +81,16 @@ type TaskExecutor = (
   registerChild: (child: ChildProcessWithoutNullStreams | null) => void,
 ) => Promise<ExecutorResult>;
 
-const EXECUTION_MODE = process.env.EXECUTION_MODE === "script" ? "script" : "simulate";
+type ExecutorAdapter = {
+  name: string;
+  matches: (task: ExecutionTaskRecord, item: ExecutionTaskItemRecord) => boolean;
+  run: TaskExecutor;
+};
+
+const EXECUTION_MODE = process.env.EXECUTION_MODE === "script" ? "script" : process.env.EXECUTION_MODE === "python" ? "python" : "simulate";
 const EXECUTION_SCRIPT = process.env.EXECUTION_SCRIPT;
+const PYTHON_EXECUTABLE = process.env.PYTHON_EXECUTABLE || "python3";
+const PYTHON_SECURITY_RUNNER = process.env.PYTHON_SECURITY_RUNNER || path.join(process.cwd(), "scripts", "security_runner.py");
 
 const escapeHtml = (value: string) =>
   value
@@ -404,6 +420,10 @@ db.exec(`
     name TEXT NOT NULL,
     status TEXT NOT NULL,
     version TEXT,
+    hardware_version TEXT,
+    software_version TEXT,
+    connection_address TEXT,
+    description TEXT,
     type TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
@@ -510,6 +530,22 @@ columns.forEach(col => {
   } catch (e) {}
 });
 
+['hardware_version', 'software_version', 'connection_address', 'description'].forEach(col => {
+  try {
+    db.exec(`ALTER TABLE assets ADD COLUMN ${col} TEXT;`);
+  } catch (e) {}
+});
+
+try {
+  db.exec(`
+    UPDATE assets
+    SET software_version = COALESCE(NULLIF(software_version, ''), NULLIF(version, ''), 'v1.0.0')
+    WHERE software_version IS NULL OR software_version = '';
+  `);
+} catch (e) {
+  // Ignore error if assets table is not initialized yet
+}
+
 try {
   db.exec("ALTER TABLE execution_tasks ADD COLUMN stop_on_failure INTEGER NOT NULL DEFAULT 0;");
 } catch (e) {
@@ -552,6 +588,38 @@ async function startServer() {
     });
   };
 
+  const pingAddress = (address: string) =>
+    new Promise<{ success: boolean; latency_ms?: number; output: string }>((resolve) => {
+      const child = spawn("ping", ["-c", "1", address], { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      const timeout = setTimeout(() => {
+        child.kill("SIGTERM");
+        resolve({ success: false, output: stderr || stdout || "Ping timeout" });
+      }, 5000);
+
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on("close", (code) => {
+        clearTimeout(timeout);
+        const output = `${stdout}${stderr}`.trim();
+        const latencyMatch = output.match(/time[=<]([0-9.]+)\s*ms/i);
+        resolve({
+          success: code === 0,
+          latency_ms: latencyMatch ? Number(latencyMatch[1]) : undefined,
+          output,
+        });
+      });
+      child.on("error", (error) => {
+        clearTimeout(timeout);
+        resolve({ success: false, output: error.message });
+      });
+    });
+
   const listTestSuites = () => db.prepare(`
     SELECT
       ts.id,
@@ -582,6 +650,49 @@ async function startServer() {
       et.started_at DESC
     LIMIT 50
   `).all();
+
+  const getExecutionTaskDetail = (taskId: number) => {
+    const task = db.prepare(`
+      SELECT
+        et.*,
+        ts.name as suite_name,
+        tc.title as test_case_title,
+        current_tc.title as current_case_title,
+        a.name as asset_name
+      FROM execution_tasks et
+      LEFT JOIN test_suites ts ON ts.id = et.suite_id
+      LEFT JOIN test_cases tc ON tc.id = et.test_case_id
+      LEFT JOIN test_cases current_tc ON current_tc.id = et.current_test_case_id
+      LEFT JOIN assets a ON a.id = et.asset_id
+      WHERE et.id = ?
+    `).get(taskId);
+
+    if (!task) {
+      return null;
+    }
+
+    const items = db.prepare(`
+      SELECT
+        eti.*,
+        tc.title,
+        tc.category,
+        tc.protocol,
+        tc.test_tool,
+        tc.test_input,
+        tc.expected_result,
+        tr.result as run_result,
+        tr.logs,
+        tr.duration,
+        tr.executed_at
+      FROM execution_task_items eti
+      JOIN test_cases tc ON tc.id = eti.test_case_id
+      LEFT JOIN test_runs tr ON tr.id = eti.run_id
+      WHERE eti.task_id = ?
+      ORDER BY eti.sort_order ASC, eti.id ASC
+    `).all(taskId);
+
+    return { task, items };
+  };
 
   const listSuiteRuns = () => db.prepare(`
     SELECT
@@ -723,9 +834,14 @@ async function startServer() {
       .replace(/\{\{protocol\}\}/g, item.protocol || "");
   };
 
-  const scriptExecutor: TaskExecutor = (task, item, broadcastEvent, registerChild) =>
-    new Promise((resolve) => {
-      const command = buildScriptCommand(task, item);
+  const spawnCommandExecutor = (
+    command: string,
+    task: ExecutionTaskRecord,
+    item: ExecutionTaskItemRecord,
+    broadcastEvent: (data: any) => void,
+    registerChild: (child: ChildProcessWithoutNullStreams | null) => void,
+  ): Promise<ExecutorResult> =>
+    new Promise<ExecutorResult>((resolve) => {
       if (!command) {
         resolve({
           result: "Blocked",
@@ -776,13 +892,96 @@ async function startServer() {
       });
     });
 
+  const shellExecutor: TaskExecutor = (task, item, broadcastEvent, registerChild) => {
+    const inlineShellCommand = item.test_tool?.startsWith("shell:") ? item.test_tool.slice("shell:".length).trim() : null;
+    const command = inlineShellCommand || buildScriptCommand(task, item);
+    return spawnCommandExecutor(command || "", task, item, broadcastEvent, registerChild);
+  };
+
+  const pythonExecutor: TaskExecutor = (task, item, broadcastEvent, registerChild) => {
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), "iov-core-task-"));
+    const payloadPath = path.join(tempDir, "payload.json");
+    const payload = {
+      task,
+      item,
+      testCase: {
+        id: item.test_case_id,
+        title: item.title,
+        category: item.category,
+        protocol: item.protocol,
+        description: item.description,
+        test_input: item.test_input,
+        test_tool: item.test_tool,
+        expected_result: item.expected_result,
+      },
+    };
+    writeFileSync(payloadPath, JSON.stringify(payload, null, 2), "utf8");
+
+      const command = `${PYTHON_EXECUTABLE} ${PYTHON_SECURITY_RUNNER} ${payloadPath}`;
+    return spawnCommandExecutor(command, task, item, broadcastEvent, registerChild).then((result) => {
+      try {
+        const lines = result.logs.split("\n").filter(Boolean);
+        const lastJsonLine = [...lines].reverse().find(line => line.trim().startsWith("{") && line.trim().endsWith("}"));
+        if (lastJsonLine) {
+          const parsed = JSON.parse(lastJsonLine);
+          return {
+            result: parsed.result || result.result,
+            duration: Number(parsed.duration || result.duration),
+            logs: parsed.logs || result.logs,
+          } as ExecutorResult;
+        }
+      } catch (error) {
+        // Fall back to raw output.
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+      return result;
+    });
+  };
+
+  const adapterRegistry: ExecutorAdapter[] = [
+    {
+      name: "shell",
+      matches: (_task, item) => Boolean(item.test_tool?.startsWith("shell:")) || EXECUTION_MODE === "script",
+      run: shellExecutor,
+    },
+    {
+      name: "python",
+      matches: (_task, item) => {
+        const tool = (item.test_tool || "").toLowerCase();
+        const signature = [item.title, item.category, item.description, item.test_input, item.test_tool]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return tool.startsWith("python:") ||
+          tool.includes("security") ||
+          tool.includes("scapy") ||
+          signature.includes("安全") ||
+          signature.includes("渗透") ||
+          signature.includes("ssh") ||
+          signature.includes("firewall") ||
+          EXECUTION_MODE === "python";
+      },
+      run: pythonExecutor,
+    },
+    {
+      name: "simulate",
+      matches: () => true,
+      run: simulateExecutor,
+    },
+  ];
+
+  const resolveExecutorAdapter = (task: ExecutionTaskRecord, item: ExecutionTaskItemRecord) =>
+    adapterRegistry.find(adapter => adapter.matches(task, item)) || adapterRegistry[adapterRegistry.length - 1];
+
   const runTaskItem = async (
     task: ExecutionTaskRecord,
     item: ExecutionTaskItemRecord,
     registerChild: (child: ChildProcessWithoutNullStreams | null) => void,
   ) => {
-    const executor = EXECUTION_MODE === "script" ? scriptExecutor : simulateExecutor;
-    return executor(task, item, broadcast, registerChild);
+    const adapter = resolveExecutorAdapter(task, item);
+    db.prepare("UPDATE execution_tasks SET executor = ? WHERE id = ?").run(adapter.name, task.id);
+    return adapter.run(task, item, broadcast, registerChild);
   };
 
   const updateTaskCounters = (taskId: number) => {
@@ -820,7 +1019,17 @@ async function startServer() {
     if (!task) return;
 
     const items = db.prepare(`
-      SELECT eti.id, eti.test_case_id, eti.sort_order, tc.title, tc.protocol
+      SELECT
+        eti.id,
+        eti.test_case_id,
+        eti.sort_order,
+        tc.title,
+        tc.protocol,
+        tc.category,
+        tc.description,
+        tc.test_input,
+        tc.test_tool,
+        tc.expected_result
       FROM execution_task_items eti
       JOIN test_cases tc ON tc.id = eti.test_case_id
       WHERE eti.task_id = ?
@@ -1120,6 +1329,44 @@ async function startServer() {
     res.json(listExecutionTasks());
   });
 
+  app.get("/api/dashboard/recent-runs", (req, res) => {
+    const runs = db.prepare(`
+      SELECT
+        tr.id,
+        tr.test_case_id,
+        tr.result,
+        tr.logs,
+        tr.duration,
+        tr.executed_by,
+        tr.executed_at,
+        tc.title as test_case_title,
+        tc.category,
+        tc.protocol,
+        tc.status as test_case_status,
+        et.id as task_id,
+        et.type as task_type,
+        et.status as task_status,
+        a.name as asset_name
+      FROM test_runs tr
+      JOIN test_cases tc ON tc.id = tr.test_case_id
+      LEFT JOIN execution_task_items eti ON eti.run_id = tr.id
+      LEFT JOIN execution_tasks et ON et.id = eti.task_id
+      LEFT JOIN assets a ON a.id = et.asset_id
+      ORDER BY tr.executed_at DESC, tr.id DESC
+      LIMIT 10
+    `).all();
+    res.json(runs);
+  });
+
+  app.get("/api/tasks/:id", (req, res) => {
+    const taskId = Number(req.params.id);
+    const detail = getExecutionTaskDetail(taskId);
+    if (!detail) {
+      return res.status(404).json({ error: "Task not found" });
+    }
+    res.json(detail);
+  });
+
   app.post("/api/tasks", (req, res) => {
     const { type, test_case_id, suite_id, asset_id, stop_on_failure } = req.body as {
       type?: "single" | "suite";
@@ -1227,29 +1474,39 @@ async function startServer() {
   app.post("/api/test-cases/import", (req, res) => {
     const { cases } = req.body;
     const insert = db.prepare(`
-      INSERT INTO test_cases (category, title, test_input, test_tool, steps, expected_result, automation_level, type, protocol)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO test_cases (category, title, test_input, test_tool, steps, expected_result, automation_level, type, protocol, description)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const transaction = db.transaction((items) => {
       for (const item of items) {
-        // 自动识别协议和类型
-        const protocol = item.category === 'CAN总线' ? 'CAN' : 
-                         item.category.includes('蓝牙') ? 'BLE' : 
-                         item.category === '车云通信' ? 'Ethernet' : 
-                         item.category.includes('无线电') ? 'WiFi' : 'Other';
-        const type = item.automation_level === 'A' ? 'Automated' : 'Manual';
-        
+        const category = String(item.category || item.module || "未分类").trim();
+        const normalizedSteps = Array.isArray(item.steps)
+          ? item.steps.map((step: string) => String(step).trim()).filter(Boolean)
+          : String(item.steps || "")
+              .split(/\r?\n/)
+              .map((step: string) => step.trim())
+              .filter(Boolean);
+        const protocol = String(
+          item.protocol ||
+          (category === "CAN总线" ? "CAN" :
+          category.includes("蓝牙") ? "BLE" :
+          category === "车云通信" ? "Ethernet" :
+          category.includes("无线电") ? "WiFi" : "Other")
+        ).trim();
+        const type = String(item.type || (item.automation_level === "A" ? "Automated" : "Manual")).trim();
+
         insert.run(
-          item.category,
+          category,
           item.title,
-          item.test_input,
-          item.test_tool,
-          JSON.stringify(item.steps.split('\n')),
-          item.expected_result,
-          item.automation_level,
+          item.test_input || "",
+          item.test_tool || "",
+          JSON.stringify(normalizedSteps),
+          item.expected_result || "",
+          item.automation_level || "B",
           type,
-          protocol
+          protocol,
+          item.description || ""
         );
       }
     });
@@ -1543,22 +1800,151 @@ async function startServer() {
   });
 
   app.get("/api/assets", (req, res) => {
-    const assets = db.prepare("SELECT * FROM assets ORDER BY created_at DESC").all();
+    const assets = db.prepare(`
+      SELECT
+        id,
+        name,
+        status,
+        type,
+        COALESCE(NULLIF(hardware_version, ''), '-') as hardware_version,
+        COALESCE(NULLIF(software_version, ''), NULLIF(version, ''), 'v1.0.0') as software_version,
+        COALESCE(connection_address, '') as connection_address,
+        COALESCE(description, '') as description,
+        created_at
+      FROM assets
+      ORDER BY created_at DESC
+    `).all();
     res.json(assets);
   });
 
   app.post("/api/assets", (req, res) => {
-    const { name, status, version, type } = req.body;
+    const { name, status, type, hardware_version, software_version, connection_address, description } = req.body;
     if (!name || !status || !type) {
       return res.status(400).json({ error: "Missing required fields" });
     }
-    const result = db.prepare("INSERT INTO assets (name, status, version, type) VALUES (?, ?, ?, ?)").run(name, status, version || 'v1.0.0', type);
+    const normalizedSoftwareVersion = String(software_version || '').trim() || 'v1.0.0';
+    const normalizedHardwareVersion = String(hardware_version || '').trim() || '-';
+    const normalizedConnectionAddress = String(connection_address || '').trim();
+    const normalizedDescription = String(description || '').trim();
+    const result = db.prepare(`
+      INSERT INTO assets (name, status, version, hardware_version, software_version, connection_address, description, type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      name,
+      status,
+      normalizedSoftwareVersion,
+      normalizedHardwareVersion,
+      normalizedSoftwareVersion,
+      normalizedConnectionAddress,
+      normalizedDescription,
+      type
+    );
     res.json({ id: result.lastInsertRowid });
   });
 
+  app.patch("/api/assets/:id", (req, res) => {
+    const assetId = Number(req.params.id);
+    const existingAsset = db.prepare("SELECT id FROM assets WHERE id = ?").get(assetId);
+    if (!existingAsset) {
+      return res.status(404).json({ error: "Asset not found" });
+    }
+
+    const { name, status, type, hardware_version, software_version, connection_address, description } = req.body;
+    if (!name || !status || !type) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const normalizedSoftwareVersion = String(software_version || '').trim() || 'v1.0.0';
+    const normalizedHardwareVersion = String(hardware_version || '').trim() || '-';
+    const normalizedConnectionAddress = String(connection_address || '').trim();
+    const normalizedDescription = String(description || '').trim();
+
+    db.prepare(`
+      UPDATE assets
+      SET name = ?,
+          status = ?,
+          type = ?,
+          version = ?,
+          hardware_version = ?,
+          software_version = ?,
+          connection_address = ?,
+          description = ?
+      WHERE id = ?
+    `).run(
+      name,
+      status,
+      type,
+      normalizedSoftwareVersion,
+      normalizedHardwareVersion,
+      normalizedSoftwareVersion,
+      normalizedConnectionAddress,
+      normalizedDescription,
+      assetId
+    );
+
+    res.json({ success: true });
+  });
+
+  app.post("/api/assets/:id/ping", async (req, res) => {
+    const assetId = Number(req.params.id);
+    const asset = db.prepare(`
+      SELECT
+        id,
+        name,
+        COALESCE(connection_address, '') as connection_address
+      FROM assets
+      WHERE id = ?
+    `).get(assetId) as { id: number; name: string; connection_address: string } | undefined;
+
+    if (!asset) {
+      return res.status(404).json({ error: "Asset not found" });
+    }
+
+    if (!asset.connection_address) {
+      return res.status(400).json({ error: "Asset connection address is empty" });
+    }
+
+    const result = await pingAddress(asset.connection_address);
+    if (!result.success) {
+      return res.status(502).json({
+        success: false,
+        asset_id: asset.id,
+        name: asset.name,
+        address: asset.connection_address,
+        output: result.output,
+      });
+    }
+
+    res.json({
+      success: true,
+      asset_id: asset.id,
+      name: asset.name,
+      address: asset.connection_address,
+      latency_ms: result.latency_ms,
+      output: result.output,
+    });
+  });
+
   app.delete("/api/assets/:id", (req, res) => {
-    const { id } = req.params;
-    db.prepare("DELETE FROM assets WHERE id = ?").run(id);
+    const assetId = Number(req.params.id);
+    const asset = db.prepare("SELECT id, name FROM assets WHERE id = ?").get(assetId);
+    if (!asset) {
+      return res.status(404).json({ error: "Asset not found" });
+    }
+
+    const activeTask = db.prepare(`
+      SELECT id
+      FROM execution_tasks
+      WHERE asset_id = ? AND status IN ('Queued', 'Running')
+      LIMIT 1
+    `).get(assetId);
+
+    if (activeTask) {
+      return res.status(409).json({ error: "Asset is currently bound to an active task" });
+    }
+
+    db.prepare("UPDATE execution_tasks SET asset_id = NULL WHERE asset_id = ?").run(assetId);
+    db.prepare("DELETE FROM assets WHERE id = ?").run(assetId);
     res.json({ success: true });
   });
 
@@ -1577,9 +1963,9 @@ async function startServer() {
     });
   }
 
-  // Seed data if empty
+  // Seed demo data only when explicitly enabled.
   const count = db.prepare("SELECT COUNT(*) as count FROM test_cases").get().count;
-  if (count === 0) {
+  if (ENABLE_DEMO_SEED && count === 0) {
     const seedCases = [
       { 
         title: "T-Box 车联网单元 CAN 总线压力测试", 
@@ -1675,11 +2061,14 @@ async function startServer() {
     insertDefect.run('UI-009', '中控屏启动动画掉帧', 'IVI', 'Minor', 'Closed');
 
     // Seed assets
-    const insertAsset = db.prepare("INSERT INTO assets (name, status, version, type) VALUES (?, ?, ?, ?)");
-    insertAsset.run('GW-01 (Gateway)', 'Online', 'v2.4.1', 'Hardware');
-    insertAsset.run('TBOX-PRO-X', 'Online', 'v4.0.2', 'Hardware');
-    insertAsset.run('ADAS-SIM-NODE', 'Offline', 'v1.1.0', 'Simulation');
-    insertAsset.run('BMS-UNIT-04', 'Online', 'v3.2.2', 'Hardware');
+    const insertAsset = db.prepare(`
+      INSERT INTO assets (name, status, version, hardware_version, software_version, description, type)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    insertAsset.run('GW-01 (Gateway)', 'Online', 'v2.4.1', 'HW-GW-01', 'v2.4.1', '主网关验证节点', 'Hardware');
+    insertAsset.run('TBOX-PRO-X', 'Online', 'v4.0.2', 'HW-TBOX-X', 'v4.0.2', 'T-Box 样机', 'Hardware');
+    insertAsset.run('ADAS-SIM-NODE', 'Offline', 'v1.1.0', 'SIM-ADAS-01', 'v1.1.0', 'ADAS 仿真节点', 'Simulation');
+    insertAsset.run('BMS-UNIT-04', 'Online', 'v3.2.2', 'HW-BMS-04', 'v3.2.2', 'BMS 试验样件', 'Hardware');
 
     const suiteInfo = db.prepare("INSERT INTO test_suites (name, description) VALUES (?, ?)").run(
       "核心 ECU 回归套件",

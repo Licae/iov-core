@@ -100,6 +100,33 @@ interface SuiteRun {
   finished_at?: string | null;
 }
 
+interface ExecutionTask {
+  id: number;
+  type: 'single' | 'suite';
+  status: 'Queued' | 'Running' | 'Completed' | 'Failed' | 'Cancelled';
+  asset_id?: number | null;
+  asset_name?: string | null;
+  suite_id?: number | null;
+  suite_name?: string | null;
+  test_case_id?: number | null;
+  test_case_title?: string | null;
+  total_items: number;
+  completed_items: number;
+  passed_items: number;
+  failed_items: number;
+  blocked_items: number;
+  current_test_case_id?: number | null;
+  current_case_title?: string | null;
+  current_item_label?: string | null;
+  started_at: string;
+  finished_at?: string | null;
+  stop_on_failure?: number;
+  error_message?: string | null;
+  executor?: string | null;
+  retry_count?: number;
+  source_task_id?: number | null;
+}
+
 // --- Components ---
 
 interface ToastProps {
@@ -172,6 +199,7 @@ export default function App() {
   const [testCases, setTestCases] = useState<TestCase[]>([]);
   const [testSuites, setTestSuites] = useState<TestSuite[]>([]);
   const [suiteRuns, setSuiteRuns] = useState<SuiteRun[]>([]);
+  const [executionTasks, setExecutionTasks] = useState<ExecutionTask[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -184,6 +212,7 @@ export default function App() {
   const [showSuiteModal, setShowSuiteModal] = useState(false);
   const [selectedCaseId, setSelectedCaseId] = useState<number | string>('');
   const [selectedAssetId, setSelectedAssetId] = useState<number | string>('');
+  const [stopOnFailure, setStopOnFailure] = useState(false);
   const [selectedSuiteCaseIds, setSelectedSuiteCaseIds] = useState<number[]>([]);
   const [importText, setImportText] = useState('');
   const [updatingIds, setUpdatingIds] = useState<number[]>([]);
@@ -246,11 +275,12 @@ export default function App() {
         if (selectedTestCase?.id === data.testCaseId) {
           fetchHistory(data.testCaseId);
           setIsRunningSimulation(false);
+          setSelectedTestCase(prev => prev ? { ...prev, status: data.result } : null);
         }
-      } else if (String(data.type || '').startsWith('SUITE_')) {
+      } else if (data.type === 'EXECUTION_TASK_UPDATED' || data.type === 'EXECUTION_TASK_COMPLETED') {
         fetchData();
-        if (data.type === 'SUITE_RUN_COMPLETED') {
-          addToast('测试套件执行完成', 'success');
+        if (data.type === 'EXECUTION_TASK_COMPLETED') {
+          addToast(data.task?.type === 'suite' ? '测试套件执行完成' : '测试任务执行完成', 'success');
         }
       }
     };
@@ -260,7 +290,7 @@ export default function App() {
 
   const fetchData = async () => {
     try {
-      const [casesRes, statsRes, trendRes, coverageRes, defectsRes, assetsRes, settingsRes, suitesRes, suiteRunsRes] = await Promise.all([
+      const [casesRes, statsRes, trendRes, coverageRes, defectsRes, assetsRes, settingsRes, suitesRes, suiteRunsRes, tasksRes] = await Promise.all([
         fetch('/api/test-cases'),
         fetch('/api/stats'),
         fetch('/api/stats/trend'),
@@ -269,7 +299,8 @@ export default function App() {
         fetch('/api/assets'),
         fetch('/api/settings'),
         fetch('/api/test-suites'),
-        fetch('/api/suite-runs')
+        fetch('/api/suite-runs'),
+        fetch('/api/tasks')
       ]);
       const cases = await casesRes.json();
       const statsData = await statsRes.json();
@@ -280,6 +311,7 @@ export default function App() {
       const settingsData = await settingsRes.json();
       const suitesData = await suitesRes.json();
       const suiteRunsData = await suiteRunsRes.json();
+      const tasksData = await tasksRes.json();
       setTestCases(cases);
       setStats(statsData);
       setTrendData(trend);
@@ -289,6 +321,7 @@ export default function App() {
       setSettings(settingsData);
       setTestSuites(suitesData);
       setSuiteRuns(suiteRunsData);
+      setExecutionTasks(tasksData);
       setRunningSuiteIds(suiteRunsData.filter((run: SuiteRun) => run.status === 'Running' || run.status === 'Queued').map((run: SuiteRun) => run.suite_id));
     } catch (error) {
       console.error('Failed to fetch data:', error);
@@ -328,25 +361,20 @@ export default function App() {
   const runSimulation = async (id: number) => {
     setIsRunningSimulation(true);
     setSimulationLogs([]);
-    addToast('正在启动模拟执行引擎...', 'success');
+    addToast('正在创建测试任务...', 'success');
     try {
       const res = await fetch(`/api/test-cases/${id}/run`, { method: 'POST' });
       if (res.ok) {
-        const data = await res.json();
+        await res.json();
         await fetchData();
-        await fetchHistory(id);
-        addToast(`模拟执行完成！结果：${data.result}`, 'success');
-        // Update selected test case status locally
-        if (selectedTestCase?.id === id) {
-          setSelectedTestCase(prev => prev ? { ...prev, status: data.result } : null);
-        }
+        addToast('测试任务已开始执行', 'success');
       } else {
         addToast('模拟执行启动失败', 'error');
+        setIsRunningSimulation(false);
       }
     } catch (error) {
       console.error('Simulation failed:', error);
       addToast('模拟执行过程中发生错误', 'error');
-    } finally {
       setIsRunningSimulation(false);
     }
   };
@@ -475,12 +503,14 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           test_case_id: selectedCaseId,
-          asset_id: selectedAssetId
+          asset_id: selectedAssetId,
+          stop_on_failure: stopOnFailure,
         })
       });
       if (res.ok) {
         addToast('测试任务已发起', 'success');
         setShowTaskModal(false);
+        setStopOnFailure(false);
         setView('running');
         fetchData();
       }
@@ -616,15 +646,47 @@ export default function App() {
 
   const runSuite = async (suiteId: number) => {
     try {
-      const res = await fetch(`/api/test-suites/${suiteId}/run`, { method: 'POST' });
+      const res = await fetch(`/api/test-suites/${suiteId}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stop_on_failure: true }),
+      });
       if (!res.ok) {
         throw new Error('Failed to run suite');
       }
-      addToast('测试套件已加入执行队列', 'success');
+      addToast('测试套件已加入执行队列（失败即停）', 'success');
       fetchData();
       setView('suites');
     } catch (error) {
       addToast('启动测试套件失败', 'error');
+    }
+  };
+
+  const cancelTask = async (taskId: number) => {
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/cancel`, { method: 'PATCH' });
+      if (!res.ok) {
+        throw new Error('Failed to cancel task');
+      }
+      addToast('任务已取消', 'success');
+      fetchData();
+      setIsRunningSimulation(false);
+    } catch (error) {
+      addToast('取消任务失败', 'error');
+    }
+  };
+
+  const retryTask = async (taskId: number) => {
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/retry`, { method: 'POST' });
+      if (!res.ok) {
+        throw new Error('Failed to retry task');
+      }
+      addToast('任务已重新加入执行队列', 'success');
+      fetchData();
+      setView('running');
+    } catch (error) {
+      addToast('重试任务失败', 'error');
     }
   };
 
@@ -664,6 +726,7 @@ export default function App() {
     boxShadow: theme === 'dark' ? '0 18px 40px rgba(0,0,0,0.32)' : '0 18px 40px rgba(148,163,184,0.18)',
   } as const;
   const tooltipItemStyle = { color: theme === 'dark' ? '#ffffff' : '#0f172a' };
+  const activeExecutionTasks = executionTasks.filter(task => task.status === 'Running' || task.status === 'Queued');
 
   const toggleSetting = async (key: string) => {
     const newValue = !settings[key];
@@ -728,7 +791,7 @@ export default function App() {
             <SidebarItem icon={LayoutDashboard} label="仪表盘" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
             <SidebarItem icon={Database} label="用例管理" active={view === 'management'} onClick={() => setView('management')} />
             <SidebarItem icon={Layers3} label="测试套件" badge={testSuites.length ? String(testSuites.length) : undefined} active={view === 'suites'} onClick={() => setView('suites')} />
-            <SidebarItem icon={PlayCircle} label="仿真执行" badge={String(testCases.filter(tc => tc.status === 'Running').length + suiteRuns.filter(run => run.status === 'Running' || run.status === 'Queued').length)} active={view === 'running'} onClick={() => setView('running')} />
+            <SidebarItem icon={PlayCircle} label="仿真执行" badge={String(activeExecutionTasks.length)} active={view === 'running'} onClick={() => setView('running')} />
             <SidebarItem icon={FileWarning} label="缺陷日志" active={view === 'defects'} onClick={() => setView('defects')} />
             <SidebarItem icon={Database} label="测试资产" active={view === 'assets'} onClick={() => setView('assets')} />
             <SidebarItem icon={BarChart3} label="分析报告" active={view === 'reports'} onClick={() => setView('reports')} />
@@ -1280,18 +1343,23 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 gap-4">
-                {suiteRuns.filter(run => run.status === 'Running' || run.status === 'Queued').map((run) => {
-                  const progress = run.total_cases > 0 ? Math.round((run.completed_cases / run.total_cases) * 100) : 0;
+                {activeExecutionTasks.map((task) => {
+                  const progress = task.total_items > 0 ? Math.round((task.completed_items / task.total_items) * 100) : 0;
+                  const title = task.type === 'suite' ? task.suite_name : task.test_case_title;
+                  const subtitle = task.type === 'suite'
+                    ? `测试套件 • ${task.total_items} 条用例`
+                    : `${task.asset_name || '未绑定资产'} • ${task.current_case_title || task.test_case_title || '单用例任务'}`;
+
                   return (
-                    <div key={`suite-run-${run.id}`} className="glass-card p-6 flex items-center gap-6">
+                    <div key={`task-${task.id}`} className="glass-card p-6 flex items-center gap-6">
                       <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center text-accent">
-                        <Layers3 size={24} />
+                        {task.type === 'suite' ? <Layers3 size={24} /> : <Activity size={24} />}
                       </div>
                       <div className="flex-1">
                         <div className="flex justify-between items-start mb-2">
                           <div>
-                            <h4 className="font-bold text-lg">{run.suite_name}</h4>
-                            <p className="text-xs text-muted uppercase font-bold tracking-wider">测试套件 • {run.total_cases} 条用例</p>
+                            <h4 className="font-bold text-lg">{title || `任务 #${task.id}`}</h4>
+                            <p className="text-xs text-muted uppercase font-bold tracking-wider">{subtitle}</p>
                           </div>
                           <div className="text-right">
                             <div className="text-xs font-bold text-accent mb-1">进度: {progress}%</div>
@@ -1305,56 +1373,43 @@ export default function App() {
                           </div>
                         </div>
                         <div className="flex items-center gap-4 text-[10px] text-muted font-mono">
-                          <span>完成: {run.completed_cases}/{run.total_cases}</span>
-                          <span>通过: {run.passed_cases}</span>
-                          <span>失败: {run.failed_cases}</span>
-                          <span className="text-accent">{run.current_case_title ? `当前: ${run.current_case_title}` : '等待调度'}</span>
+                          <span>状态: {task.status}</span>
+                          <span>完成: {task.completed_items}/{task.total_items}</span>
+                          <span>通过: {task.passed_items}</span>
+                          <span>失败: {task.failed_items}</span>
+                          <span>{task.stop_on_failure ? '策略: 失败即停' : '策略: 全部执行'}</span>
+                          <span>执行器: {task.executor || 'simulate'}</span>
+                          <span className="text-accent">{task.current_case_title ? `当前: ${task.current_case_title}` : '等待调度'}</span>
                         </div>
+                        {task.error_message && (
+                          <div className="mt-2 text-[10px] text-danger font-medium">{task.error_message}</div>
+                        )}
+                        {task.retry_count ? (
+                          <div className="mt-2 text-[10px] text-muted font-medium">重试次数: {task.retry_count}</div>
+                        ) : null}
+                      </div>
+                      <div className="flex gap-2">
+                        {(task.status === 'Running' || task.status === 'Queued') ? (
+                          <button
+                            onClick={() => cancelTask(task.id)}
+                            className="px-3 py-2 rounded-lg border border-danger/30 text-danger text-[10px] font-bold uppercase"
+                          >
+                            取消
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => retryTask(task.id)}
+                            className="px-3 py-2 rounded-lg border border-accent/30 text-accent text-[10px] font-bold uppercase"
+                          >
+                            重试
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
                 })}
 
-                {testCases.filter(tc => tc.status === 'Running').map((tc, i) => (
-                  <div key={tc.id} className="glass-card p-6 flex items-center gap-6">
-                    <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center text-accent">
-                      <Activity size={24} />
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex justify-between items-start mb-2">
-                        <div>
-                          <h4 className="font-bold text-lg">{tc.title}</h4>
-                          <p className="text-xs text-muted uppercase font-bold tracking-wider">{tc.category} • {tc.protocol}</p>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-xs font-bold text-accent mb-1">进度: {45 + i * 12}%</div>
-                          <div className="w-32 h-1.5 bg-white/5 rounded-full overflow-hidden">
-                            <motion.div 
-                              initial={{ width: 0 }}
-                              animate={{ width: `${45 + i * 12}%` }}
-                              className="h-full bg-accent" 
-                            />
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-4 text-[10px] text-muted font-mono">
-                        <span className="flex items-center gap-1"><Clock size={10} /> 已运行: 04:22</span>
-                        <span className="flex items-center gap-1"><Zap size={10} /> 吞吐量: 850 msg/s</span>
-                        <span className="flex items-center gap-1 text-success"><ShieldCheck size={10} /> 无异常</span>
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <button className="p-2 hover:bg-white/5 rounded-lg text-muted transition-colors">
-                        <Settings size={18} />
-                      </button>
-                      <button className="p-2 hover:bg-danger/10 rounded-lg text-danger transition-colors">
-                        <XCircle size={18} />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-                
-                {testCases.filter(tc => tc.status === 'Running').length === 0 && suiteRuns.filter(run => run.status === 'Running' || run.status === 'Queued').length === 0 && (
+                {executionTasks.length === 0 && (
                   <div className="glass-card p-20 flex flex-col items-center justify-center text-center space-y-4">
                     <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center text-muted">
                       <Activity size={32} />
@@ -1371,6 +1426,38 @@ export default function App() {
                     </button>
                   </div>
                 )}
+
+                {activeExecutionTasks.length === 0 && executionTasks.length > 0 && executionTasks.slice(0, 6).map((task) => {
+                  const progress = task.total_items > 0 ? Math.round((task.completed_items / task.total_items) * 100) : 0;
+                  const title = task.type === 'suite' ? task.suite_name : task.test_case_title;
+                  return (
+                    <div key={`history-task-${task.id}`} className="glass-card p-6 flex items-center gap-6 opacity-80">
+                      <div className="w-12 h-12 rounded-xl bg-white/5 flex items-center justify-center text-muted">
+                        {task.type === 'suite' ? <Layers3 size={24} /> : <Activity size={24} />}
+                      </div>
+                      <div className="flex-1">
+                        <div className="flex justify-between items-start mb-2">
+                          <div>
+                            <h4 className="font-bold text-lg">{title || `任务 #${task.id}`}</h4>
+                            <p className="text-xs text-muted uppercase font-bold tracking-wider">{task.status} • 进度 {progress}%</p>
+                          </div>
+                          <button
+                            onClick={() => retryTask(task.id)}
+                            className="px-3 py-2 rounded-lg border border-accent/30 text-accent text-[10px] font-bold uppercase"
+                          >
+                            重新执行
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-4 text-[10px] text-muted font-mono">
+                          <span>执行器: {task.executor || 'simulate'}</span>
+                          <span>{task.stop_on_failure ? '策略: 失败即停' : '策略: 全部执行'}</span>
+                          <span>通过: {task.passed_items}</span>
+                          <span>失败: {task.failed_items}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           ) : view === 'defects' ? (
@@ -1778,6 +1865,19 @@ export default function App() {
                     发起任务后，系统将自动加载仿真脚本并建立与目标 ECU 的通信链路。预计耗时 2-5 分钟。
                   </p>
                 </div>
+
+                <label className="flex items-center justify-between p-4 rounded-xl border border-border bg-white/2">
+                  <div>
+                    <div className="text-xs font-bold uppercase tracking-wider">失败即停</div>
+                    <div className="text-[10px] text-muted mt-1">任务内任一步失败后，立即停止后续执行。</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={stopOnFailure}
+                    onChange={(e) => setStopOnFailure(e.target.checked)}
+                    className="h-4 w-4"
+                  />
+                </label>
 
                 <button 
                   type="submit" 

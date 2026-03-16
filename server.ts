@@ -6,6 +6,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import http from "http";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 
 dotenv.config();
 
@@ -26,6 +27,54 @@ type SuiteRunProgress = {
   failedCases: number;
   blockedCases: number;
 };
+
+type ExecutionTaskRecord = {
+  id: number;
+  type: "single" | "suite";
+  status: "Queued" | "Running" | "Completed" | "Failed" | "Cancelled";
+  asset_id?: number | null;
+  suite_id?: number | null;
+  test_case_id?: number | null;
+  total_items: number;
+  completed_items: number;
+  passed_items: number;
+  failed_items: number;
+  blocked_items: number;
+  current_test_case_id?: number | null;
+  current_item_label?: string | null;
+  started_at: string;
+  finished_at?: string | null;
+  initiated_by?: string | null;
+  error_message?: string | null;
+  stop_on_failure?: number;
+  executor?: string | null;
+  source_task_id?: number | null;
+  retry_count?: number;
+};
+
+type ExecutionTaskItemRecord = {
+  id: number;
+  test_case_id: number;
+  sort_order: number;
+  title: string;
+  protocol?: string | null;
+};
+
+type ExecutorResult = {
+  result: "Passed" | "Failed" | "Blocked";
+  duration: number;
+  logs: string;
+};
+
+type TaskExecutor = (
+  task: ExecutionTaskRecord,
+  item: ExecutionTaskItemRecord,
+  broadcast: (data: any) => void,
+  registerChild: (child: ChildProcessWithoutNullStreams | null) => void,
+) => Promise<ExecutorResult>;
+
+const EXECUTION_MODE = process.env.EXECUTION_MODE === "script" ? "script" : "simulate";
+const EXECUTION_SCRIPT = process.env.EXECUTION_SCRIPT;
 
 const escapeHtml = (value: string) =>
   value
@@ -391,6 +440,50 @@ db.exec(`
     FOREIGN KEY(current_case_id) REFERENCES test_cases(id)
   );
 
+  CREATE TABLE IF NOT EXISTS execution_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Queued',
+    asset_id INTEGER,
+    suite_id INTEGER,
+    test_case_id INTEGER,
+    total_items INTEGER NOT NULL DEFAULT 0,
+    completed_items INTEGER NOT NULL DEFAULT 0,
+    passed_items INTEGER NOT NULL DEFAULT 0,
+    failed_items INTEGER NOT NULL DEFAULT 0,
+    blocked_items INTEGER NOT NULL DEFAULT 0,
+    current_test_case_id INTEGER,
+    current_item_label TEXT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME,
+    initiated_by TEXT,
+    error_message TEXT,
+    stop_on_failure INTEGER NOT NULL DEFAULT 0,
+    executor TEXT DEFAULT 'simulate',
+    source_task_id INTEGER,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(asset_id) REFERENCES assets(id),
+    FOREIGN KEY(suite_id) REFERENCES test_suites(id),
+    FOREIGN KEY(test_case_id) REFERENCES test_cases(id),
+    FOREIGN KEY(current_test_case_id) REFERENCES test_cases(id),
+    FOREIGN KEY(source_task_id) REFERENCES execution_tasks(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS execution_task_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    test_case_id INTEGER NOT NULL,
+    sort_order INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Queued',
+    result TEXT,
+    run_id INTEGER,
+    started_at DATETIME,
+    finished_at DATETIME,
+    FOREIGN KEY(task_id) REFERENCES execution_tasks(id),
+    FOREIGN KEY(test_case_id) REFERENCES test_cases(id),
+    FOREIGN KEY(run_id) REFERENCES test_runs(id)
+  );
+
   INSERT OR IGNORE INTO settings (key, value) VALUES ('abort_on_critical_dtc', 'true');
   INSERT OR IGNORE INTO settings (key, value) VALUES ('pr_requires_sil', 'true');
 `);
@@ -417,12 +510,29 @@ columns.forEach(col => {
   } catch (e) {}
 });
 
+try {
+  db.exec("ALTER TABLE execution_tasks ADD COLUMN stop_on_failure INTEGER NOT NULL DEFAULT 0;");
+} catch (e) {
+  // Ignore error if column already exists
+}
+
+["executor TEXT DEFAULT 'simulate'", "source_task_id INTEGER", "retry_count INTEGER NOT NULL DEFAULT 0"].forEach(definition => {
+  const columnName = definition.split(" ")[0];
+  try {
+    db.exec(`ALTER TABLE execution_tasks ADD COLUMN ${definition};`);
+  } catch (e) {
+    // Ignore error if column already exists
+  }
+});
+
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server });
   const PORT = 3000;
   const activeSuiteRuns = new Map<number, NodeJS.Timeout[]>();
+  const activeTaskRuns = new Map<number, NodeJS.Timeout[]>();
+  const activeTaskChildren = new Map<number, ChildProcessWithoutNullStreams>();
 
   app.use(express.json());
 
@@ -455,19 +565,449 @@ async function startServer() {
     ORDER BY ts.created_at DESC
   `).all();
 
+  const listExecutionTasks = () => db.prepare(`
+    SELECT
+      et.*,
+      ts.name as suite_name,
+      tc.title as test_case_title,
+      current_tc.title as current_case_title,
+      a.name as asset_name
+    FROM execution_tasks et
+    LEFT JOIN test_suites ts ON ts.id = et.suite_id
+    LEFT JOIN test_cases tc ON tc.id = et.test_case_id
+    LEFT JOIN test_cases current_tc ON current_tc.id = et.current_test_case_id
+    LEFT JOIN assets a ON a.id = et.asset_id
+    ORDER BY
+      CASE WHEN et.status IN ('Running', 'Queued') THEN 0 ELSE 1 END,
+      et.started_at DESC
+    LIMIT 50
+  `).all();
+
   const listSuiteRuns = () => db.prepare(`
     SELECT
-      sr.*,
+      et.id,
+      et.suite_id,
       ts.name as suite_name,
-      tc.title as current_case_title
-    FROM suite_runs sr
-    LEFT JOIN test_suites ts ON ts.id = sr.suite_id
-    LEFT JOIN test_cases tc ON tc.id = sr.current_case_id
+      et.status,
+      et.total_items as total_cases,
+      et.completed_items as completed_cases,
+      et.passed_items as passed_cases,
+      et.failed_items as failed_cases,
+      et.blocked_items as blocked_cases,
+      et.current_test_case_id as current_case_id,
+      current_tc.title as current_case_title,
+      et.started_at,
+      et.finished_at
+    FROM execution_tasks et
+    LEFT JOIN test_suites ts ON ts.id = et.suite_id
+    LEFT JOIN test_cases current_tc ON current_tc.id = et.current_test_case_id
+    WHERE et.type = 'suite'
     ORDER BY
-      CASE WHEN sr.status = 'Running' THEN 0 ELSE 1 END,
-      sr.started_at DESC
+      CASE WHEN et.status IN ('Running', 'Queued') THEN 0 ELSE 1 END,
+      et.started_at DESC
     LIMIT 20
   `).all();
+
+  const createExecutionTask = ({
+    type,
+    assetId,
+    suiteId,
+    testCaseId,
+    initiatedBy,
+    testCaseIds,
+    stopOnFailure,
+    sourceTaskId,
+    retryCount,
+  }: {
+    type: "single" | "suite";
+    assetId?: number | null;
+    suiteId?: number | null;
+    testCaseId?: number | null;
+    initiatedBy?: string;
+    testCaseIds: number[];
+    stopOnFailure?: boolean;
+    sourceTaskId?: number | null;
+    retryCount?: number;
+  }) => {
+    const transaction = db.transaction(() => {
+      const info = db.prepare(`
+        INSERT INTO execution_tasks (type, status, asset_id, suite_id, test_case_id, total_items, current_test_case_id, initiated_by, stop_on_failure, executor, source_task_id, retry_count)
+        VALUES (?, 'Queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        type,
+        assetId || null,
+        suiteId || null,
+        testCaseId || null,
+        testCaseIds.length,
+        testCaseIds[0] || null,
+        initiatedBy || "System",
+        stopOnFailure ? 1 : 0,
+        EXECUTION_MODE,
+        sourceTaskId || null,
+        retryCount || 0
+      );
+
+      const taskId = Number(info.lastInsertRowid);
+      const insertItem = db.prepare(`
+        INSERT INTO execution_task_items (task_id, test_case_id, sort_order)
+        VALUES (?, ?, ?)
+      `);
+
+      testCaseIds.forEach((id, index) => insertItem.run(taskId, id, index + 1));
+      return taskId;
+    });
+
+    return transaction();
+  };
+
+  const cloneExecutionTask = (taskId: number) => {
+    const task = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
+    if (!task) return null;
+    if (["Queued", "Running"].includes(task.status)) return { error: "Task is still active" } as const;
+
+    const items = db.prepare(`
+      SELECT test_case_id
+      FROM execution_task_items
+      WHERE task_id = ?
+      ORDER BY sort_order ASC, id ASC
+    `).all(taskId) as Array<{ test_case_id: number }>;
+    if (!items.length) return { error: "Task has no items" } as const;
+
+    const newTaskId = createExecutionTask({
+      type: task.type,
+      assetId: task.asset_id || null,
+      suiteId: task.suite_id || null,
+      testCaseId: task.test_case_id || null,
+      testCaseIds: items.map(item => item.test_case_id),
+      initiatedBy: "User",
+      stopOnFailure: Boolean(task.stop_on_failure),
+      sourceTaskId: task.id,
+      retryCount: Number(task.retry_count || 0) + 1,
+    });
+    return { taskId: newTaskId } as const;
+  };
+
+  const simulateExecutor: TaskExecutor = async (task, item, broadcastEvent) => {
+    const results: Array<"Passed" | "Failed" | "Blocked"> = ["Passed", "Failed", "Blocked"];
+    const protocol = item.protocol || "CAN";
+    const duration = Math.floor(Math.random() * 240) + 60;
+
+    for (let logIndex = 1; logIndex <= 4; logIndex += 1) {
+      await new Promise(resolve => setTimeout(resolve, 220));
+      const hex = Array.from({ length: 8 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, "0")).join(" ");
+      broadcastEvent({
+        type: "SIMULATION_LOG",
+        taskId: task.id,
+        testCaseId: item.test_case_id,
+        message: `[${protocol}] Step ${logIndex}: ID=0x${Math.floor(Math.random() * 2048).toString(16)} DATA=[${hex}]`,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const result = results[Math.floor(Math.random() * results.length)];
+    return {
+      result,
+      duration,
+      logs: `Execution task ${task.id}: ${item.title} completed with ${result}`,
+    };
+  };
+
+  const buildScriptCommand = (task: ExecutionTaskRecord, item: ExecutionTaskItemRecord) => {
+    if (!EXECUTION_SCRIPT) return null;
+    return EXECUTION_SCRIPT
+      .replace(/\{\{taskId\}\}/g, String(task.id))
+      .replace(/\{\{testCaseId\}\}/g, String(item.test_case_id))
+      .replace(/\{\{suiteId\}\}/g, String(task.suite_id || ""))
+      .replace(/\{\{assetId\}\}/g, String(task.asset_id || ""))
+      .replace(/\{\{title\}\}/g, item.title)
+      .replace(/\{\{protocol\}\}/g, item.protocol || "");
+  };
+
+  const scriptExecutor: TaskExecutor = (task, item, broadcastEvent, registerChild) =>
+    new Promise((resolve) => {
+      const command = buildScriptCommand(task, item);
+      if (!command) {
+        resolve({
+          result: "Blocked",
+          duration: 0,
+          logs: "EXECUTION_SCRIPT is not configured",
+        });
+        return;
+      }
+
+      const startedAt = Date.now();
+      const output: string[] = [];
+      const child = spawn(command, { shell: true, cwd: process.cwd(), env: process.env });
+      registerChild(child);
+
+      const handleChunk = (chunk: Buffer, stream: "stdout" | "stderr") => {
+        const text = chunk.toString().trim();
+        if (!text) return;
+        output.push(`[${stream}] ${text}`);
+        text.split("\n").forEach(line => {
+          broadcastEvent({
+            type: "SIMULATION_LOG",
+            taskId: task.id,
+            testCaseId: item.test_case_id,
+            message: line,
+            timestamp: new Date().toISOString(),
+          });
+        });
+      };
+
+      child.stdout.on("data", (chunk) => handleChunk(chunk, "stdout"));
+      child.stderr.on("data", (chunk) => handleChunk(chunk, "stderr"));
+      child.on("close", (code, signal) => {
+        registerChild(null);
+        const duration = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+        if (signal === "SIGTERM") {
+          resolve({
+            result: "Blocked",
+            duration,
+            logs: output.join("\n") || "Execution cancelled",
+          });
+          return;
+        }
+        resolve({
+          result: code === 0 ? "Passed" : "Failed",
+          duration,
+          logs: output.join("\n") || `Script exited with code ${code ?? -1}`,
+        });
+      });
+    });
+
+  const runTaskItem = async (
+    task: ExecutionTaskRecord,
+    item: ExecutionTaskItemRecord,
+    registerChild: (child: ChildProcessWithoutNullStreams | null) => void,
+  ) => {
+    const executor = EXECUTION_MODE === "script" ? scriptExecutor : simulateExecutor;
+    return executor(task, item, broadcast, registerChild);
+  };
+
+  const updateTaskCounters = (taskId: number) => {
+    const stats = db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'Completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN result = 'Passed' THEN 1 ELSE 0 END) as passed,
+        SUM(CASE WHEN result = 'Failed' THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN result = 'Blocked' THEN 1 ELSE 0 END) as blocked
+      FROM execution_task_items
+      WHERE task_id = ?
+    `).get(taskId) as Record<string, number>;
+
+    db.prepare(`
+      UPDATE execution_tasks
+      SET total_items = ?,
+          completed_items = ?,
+          passed_items = ?,
+          failed_items = ?,
+          blocked_items = ?
+      WHERE id = ?
+    `).run(
+      Number(stats.total || 0),
+      Number(stats.completed || 0),
+      Number(stats.passed || 0),
+      Number(stats.failed || 0),
+      Number(stats.blocked || 0),
+      taskId
+    );
+  };
+
+  const scheduleExecutionTask = (taskId: number) => {
+    const task = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
+    if (!task) return;
+
+    const items = db.prepare(`
+      SELECT eti.id, eti.test_case_id, eti.sort_order, tc.title, tc.protocol
+      FROM execution_task_items eti
+      JOIN test_cases tc ON tc.id = eti.test_case_id
+      WHERE eti.task_id = ?
+      ORDER BY eti.sort_order ASC, eti.id ASC
+    `).all(taskId) as ExecutionTaskItemRecord[];
+
+    if (items.length === 0) {
+      db.prepare("UPDATE execution_tasks SET status = 'Completed', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(taskId);
+      return;
+    }
+
+    const completeTask = (status: "Completed" | "Failed" | "Cancelled" = "Completed", errorMessage?: string | null) => {
+      updateTaskCounters(taskId);
+      db.prepare(`
+        UPDATE execution_tasks
+        SET status = ?,
+            current_test_case_id = NULL,
+            current_item_label = NULL,
+            finished_at = CURRENT_TIMESTAMP,
+            error_message = ?
+        WHERE id = ?
+      `).run(status, errorMessage || null, taskId);
+
+      const completedTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId);
+      broadcast({ type: "EXECUTION_TASK_COMPLETED", task: completedTask });
+      activeTaskRuns.delete(taskId);
+      activeTaskChildren.delete(taskId);
+    };
+
+    const cancelPendingTimers = () => {
+      const pendingTimers = activeTaskRuns.get(taskId) || [];
+      pendingTimers.forEach(timer => clearTimeout(timer));
+      activeTaskRuns.delete(taskId);
+      const activeChild = activeTaskChildren.get(taskId);
+      if (activeChild) {
+        activeChild.kill("SIGTERM");
+        activeTaskChildren.delete(taskId);
+      }
+    };
+
+    const executeSequentially = async () => {
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index];
+        const latestTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
+        if (!latestTask || ["Cancelled", "Failed"].includes(latestTask.status)) {
+          break;
+        }
+
+        db.prepare("UPDATE test_cases SET status = 'Running' WHERE id = ?").run(item.test_case_id);
+        db.prepare(`
+          UPDATE execution_task_items
+          SET status = 'Running',
+              started_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(item.id);
+        db.prepare(`
+          UPDATE execution_tasks
+          SET status = 'Running',
+              current_test_case_id = ?,
+              current_item_label = ?
+          WHERE id = ?
+        `).run(item.test_case_id, item.title, taskId);
+
+        broadcast({
+          type: "EXECUTION_TASK_UPDATED",
+          task: db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId),
+        });
+        const refreshedTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord;
+        const { result, duration, logs } = await runTaskItem(refreshedTask, item, (child) => {
+          if (child) {
+            activeTaskChildren.set(taskId, child);
+          } else {
+            activeTaskChildren.delete(taskId);
+          }
+        });
+
+        const currentTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
+        if (!currentTask || currentTask.status === "Cancelled") {
+          break;
+        }
+
+        const runInfo = db.prepare(`
+          INSERT INTO test_runs (test_case_id, result, logs, duration, executed_by)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(item.test_case_id, result, logs, duration, refreshedTask.type === "suite" ? "Task-Orchestrator" : "Auto-Runner");
+
+        db.prepare("UPDATE test_cases SET status = ? WHERE id = ?").run(result, item.test_case_id);
+        db.prepare(`
+          UPDATE execution_task_items
+          SET status = 'Completed',
+              result = ?,
+              run_id = ?,
+              finished_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(result, Number(runInfo.lastInsertRowid), item.id);
+
+        updateTaskCounters(taskId);
+
+        const isLast = index === items.length - 1;
+        const stopOnFailureTriggered = Boolean(currentTask.stop_on_failure) && result === "Failed";
+        if (stopOnFailureTriggered) {
+          db.prepare(`
+            UPDATE execution_task_items
+            SET status = 'Cancelled',
+                finished_at = CURRENT_TIMESTAMP
+            WHERE task_id = ? AND sort_order > ?
+          `).run(taskId, item.sort_order);
+          completeTask("Failed", `Task stopped after failure on ${item.title}`);
+          cancelPendingTimers();
+          break;
+        } else if (isLast) {
+          completeTask();
+        } else {
+          const nextItem = items[index + 1];
+          db.prepare(`
+            UPDATE execution_tasks
+            SET current_test_case_id = ?,
+                current_item_label = ?
+            WHERE id = ?
+          `).run(nextItem.test_case_id, nextItem.title, taskId);
+
+          broadcast({
+            type: "EXECUTION_TASK_UPDATED",
+            task: db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId),
+          });
+        }
+
+        broadcast({
+          type: "SIMULATION_COMPLETE",
+          taskId,
+          testCaseId: item.test_case_id,
+          result,
+        });
+      }
+    };
+
+    const runner = executeSequentially();
+    activeTaskRuns.set(taskId, []);
+    runner.catch((error) => {
+      console.error("Execution task failed:", error);
+      completeTask("Failed", error instanceof Error ? error.message : "Task failed");
+    });
+  };
+
+  const cancelExecutionTask = (taskId: number) => {
+    const task = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
+    if (!task || !["Queued", "Running"].includes(task.status)) {
+      return false;
+    }
+
+    const timers = activeTaskRuns.get(taskId) || [];
+    timers.forEach(timer => clearTimeout(timer));
+    activeTaskRuns.delete(taskId);
+
+    db.prepare(`
+      UPDATE execution_task_items
+      SET status = CASE WHEN status = 'Completed' THEN status ELSE 'Cancelled' END,
+          finished_at = CASE WHEN status = 'Completed' THEN finished_at ELSE CURRENT_TIMESTAMP END
+      WHERE task_id = ?
+    `).run(taskId);
+
+    db.prepare(`
+      UPDATE execution_tasks
+      SET status = 'Cancelled',
+          current_test_case_id = NULL,
+          current_item_label = NULL,
+          finished_at = CURRENT_TIMESTAMP,
+          error_message = 'Cancelled by user'
+      WHERE id = ?
+    `).run(taskId);
+
+    const runningItems = db.prepare(`
+      SELECT test_case_id
+      FROM execution_task_items
+      WHERE task_id = ? AND status = 'Running'
+    `).all(taskId) as Array<{ test_case_id: number }>;
+    runningItems.forEach(item => {
+      db.prepare("UPDATE test_cases SET status = 'Draft' WHERE id = ?").run(item.test_case_id);
+    });
+
+    broadcast({
+      type: "EXECUTION_TASK_COMPLETED",
+      task: db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId),
+    });
+
+    return true;
+  };
 
   const scheduleSuiteRun = (suiteRunId: number, suiteId: number) => {
     const suiteCases = db.prepare(`
@@ -576,16 +1116,104 @@ async function startServer() {
     res.json(cases);
   });
 
+  app.get("/api/tasks", (req, res) => {
+    res.json(listExecutionTasks());
+  });
+
+  app.post("/api/tasks", (req, res) => {
+    const { type, test_case_id, suite_id, asset_id, stop_on_failure } = req.body as {
+      type?: "single" | "suite";
+      test_case_id?: number;
+      suite_id?: number;
+      asset_id?: number;
+      stop_on_failure?: boolean;
+    };
+
+    if (type === "single") {
+      if (!test_case_id) {
+        return res.status(400).json({ error: "test_case_id is required" });
+      }
+      const testCase = db.prepare("SELECT id FROM test_cases WHERE id = ?").get(test_case_id);
+      if (!testCase) {
+        return res.status(404).json({ error: "Test case not found" });
+      }
+
+      const taskId = createExecutionTask({
+        type: "single",
+        assetId: asset_id || null,
+        testCaseId: test_case_id,
+        testCaseIds: [test_case_id],
+        initiatedBy: "User",
+        stopOnFailure: Boolean(stop_on_failure),
+      });
+      scheduleExecutionTask(taskId);
+      return res.json({ id: taskId, success: true });
+    }
+
+    if (type === "suite") {
+      if (!suite_id) {
+        return res.status(400).json({ error: "suite_id is required" });
+      }
+      const suite = db.prepare("SELECT * FROM test_suites WHERE id = ?").get(suite_id);
+      if (!suite) {
+        return res.status(404).json({ error: "Suite not found" });
+      }
+
+      const suiteCases = db.prepare(`
+        SELECT test_case_id
+        FROM test_suite_cases
+        WHERE suite_id = ?
+        ORDER BY sort_order ASC, id ASC
+      `).all(suite_id) as Array<{ test_case_id: number }>;
+
+      if (suiteCases.length === 0) {
+        return res.status(400).json({ error: "Suite has no test cases" });
+      }
+
+      const existingRun = db.prepare(`
+        SELECT id
+        FROM execution_tasks
+        WHERE suite_id = ? AND status IN ('Queued', 'Running')
+        ORDER BY started_at DESC
+        LIMIT 1
+      `).get(suite_id);
+      if (existingRun) {
+        return res.status(409).json({ error: "Suite is already running" });
+      }
+
+      const taskId = createExecutionTask({
+        type: "suite",
+        assetId: asset_id || null,
+        suiteId: suite_id,
+        testCaseIds: suiteCases.map(item => item.test_case_id),
+        initiatedBy: "User",
+        stopOnFailure: Boolean(stop_on_failure),
+      });
+      scheduleExecutionTask(taskId);
+      return res.json({ id: taskId, success: true });
+    }
+
+    return res.status(400).json({ error: "Unsupported task type" });
+  });
+
   app.post("/api/test-runs", (req, res) => {
-    const { test_case_id, asset_id } = req.body;
-    // 模拟发起测试任务：更新用例状态为 Running
-    db.prepare("UPDATE test_cases SET status = 'Running' WHERE id = ?").run(test_case_id);
-    // 记录一条初始运行记录
-    const info = db.prepare(
-      "INSERT INTO test_runs (test_case_id, result, logs, executed_by) VALUES (?, ?, ?, ?)"
-    ).run(test_case_id, 'Running', `Task initiated for asset ID: ${asset_id}`, 'User');
-    
-    res.json({ id: info.lastInsertRowid });
+    const { test_case_id, asset_id, stop_on_failure } = req.body;
+    const testCaseId = Number(test_case_id);
+    const testCase = db.prepare("SELECT id FROM test_cases WHERE id = ?").get(testCaseId);
+    if (!testCase) {
+      return res.status(404).json({ error: "Test case not found" });
+    }
+
+    const taskId = createExecutionTask({
+      type: "single",
+      assetId: asset_id ? Number(asset_id) : null,
+      testCaseId,
+      testCaseIds: [testCaseId],
+      initiatedBy: "User",
+      stopOnFailure: Boolean(stop_on_failure),
+    });
+    scheduleExecutionTask(taskId);
+    res.json({ id: taskId, success: true });
   });
 
   app.post("/api/test-cases", (req, res) => {
@@ -643,6 +1271,8 @@ async function startServer() {
 
   app.delete("/api/test-cases/:id", (req, res) => {
     const { id } = req.params;
+    db.prepare("DELETE FROM execution_task_items WHERE test_case_id = ?").run(id);
+    db.prepare("DELETE FROM execution_tasks WHERE test_case_id = ? OR current_test_case_id = ?").run(id, id);
     db.prepare("DELETE FROM test_runs WHERE test_case_id = ?").run(id);
     db.prepare("DELETE FROM test_cases WHERE id = ?").run(id);
     res.json({ success: true });
@@ -729,52 +1359,23 @@ async function startServer() {
 
   // 模拟执行测试用例
   app.post("/api/test-cases/:id/run", (req, res) => {
-    const { id } = req.params;
-    
-    // 1. 更新状态为 Running
-    db.prepare("UPDATE test_cases SET status = 'Running' WHERE id = ?").run(id);
-    
-    // 2. 模拟延迟后决定结果 (这里我们直接同步返回，前端处理动画)
-    // 实际生产中这通常是异步的，但为了演示，我们随机生成一个结果
-    const results = ['Passed', 'Failed', 'Blocked'];
-    const finalResult = results[Math.floor(Math.random() * results.length)];
-    
-    // 模拟实时报文发送
-    const protocols = ['CAN', 'DoIP', 'V2X', 'Ethernet'];
-    const protocol = protocols[Math.floor(Math.random() * protocols.length)];
-    
-    let step = 0;
-    const interval = setInterval(() => {
-      step++;
-      const hex = Array.from({length: 8}, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join(' ');
-      broadcast({
-        type: 'SIMULATION_LOG',
-        testCaseId: parseInt(id),
-        message: `[${protocol}] Frame ${step}: ID=0x${Math.floor(Math.random() * 2048).toString(16)} DATA=[${hex}]`,
-        timestamp: new Date().toISOString()
-      });
-      
-      if (step >= 10) {
-        clearInterval(interval);
-        broadcast({
-          type: 'SIMULATION_COMPLETE',
-          testCaseId: parseInt(id),
-          result: finalResult
-        });
-      }
-    }, 500);
+    const testCaseId = Number(req.params.id);
+    const { stop_on_failure } = req.body || {};
+    const testCase = db.prepare("SELECT id FROM test_cases WHERE id = ?").get(testCaseId);
+    if (!testCase) {
+      return res.status(404).json({ error: "Test case not found" });
+    }
 
-    const logs = `Simulation run at ${new Date().toISOString()}: Initializing... Protocol check... Execution complete. Result: ${finalResult}`;
-    
-    // 3. 记录运行结果
-    const duration = Math.floor(Math.random() * 600) + 60; // 1-11 minutes
-    db.prepare("INSERT INTO test_runs (test_case_id, result, logs, duration, executed_by) VALUES (?, ?, ?, ?, ?)")
-      .run(id, finalResult, logs, duration, 'Auto-Runner');
-      
-    // 4. 更新最终状态
-    db.prepare("UPDATE test_cases SET status = ? WHERE id = ?").run(finalResult, id);
-    
-    res.json({ success: true, result: finalResult, logs });
+    const taskId = createExecutionTask({
+      type: "single",
+      testCaseId,
+      testCaseIds: [testCaseId],
+      initiatedBy: "User",
+      stopOnFailure: Boolean(stop_on_failure),
+    });
+    scheduleExecutionTask(taskId);
+
+    res.json({ success: true, taskId });
   });
 
   app.get("/api/settings", (req, res) => {
@@ -869,6 +1470,9 @@ async function startServer() {
 
   app.delete("/api/test-suites/:id", (req, res) => {
     const { id } = req.params;
+    const taskIds = db.prepare("SELECT id FROM execution_tasks WHERE suite_id = ?").all(id) as Array<{ id: number }>;
+    taskIds.forEach(({ id: taskId }) => db.prepare("DELETE FROM execution_task_items WHERE task_id = ?").run(taskId));
+    db.prepare("DELETE FROM execution_tasks WHERE suite_id = ?").run(id);
     db.prepare("DELETE FROM suite_runs WHERE suite_id = ?").run(id);
     db.prepare("DELETE FROM test_suite_cases WHERE suite_id = ?").run(id);
     db.prepare("DELETE FROM test_suites WHERE id = ?").run(id);
@@ -879,38 +1483,63 @@ async function startServer() {
     res.json(listSuiteRuns());
   });
 
+  app.patch("/api/tasks/:id/cancel", (req, res) => {
+    const taskId = Number(req.params.id);
+    const success = cancelExecutionTask(taskId);
+    if (!success) {
+      return res.status(409).json({ error: "Task cannot be cancelled" });
+    }
+    res.json({ success: true });
+  });
+
+  app.post("/api/tasks/:id/retry", (req, res) => {
+    const taskId = Number(req.params.id);
+    const cloned = cloneExecutionTask(taskId);
+    if (!cloned) {
+      return res.status(404).json({ error: "Task not found" });
+    }
+    if ("error" in cloned) {
+      return res.status(409).json({ error: cloned.error });
+    }
+
+    scheduleExecutionTask(cloned.taskId);
+    res.json({ success: true, id: cloned.taskId });
+  });
+
   app.post("/api/test-suites/:id/run", (req, res) => {
-    const { id } = req.params;
-    const suite = db.prepare("SELECT * FROM test_suites WHERE id = ?").get(id);
+    const suiteId = Number(req.params.id);
+    const { stop_on_failure } = req.body || {};
+    const suite = db.prepare("SELECT * FROM test_suites WHERE id = ?").get(suiteId);
     if (!suite) {
       return res.status(404).json({ error: "Suite not found" });
     }
 
-    const suiteCases = db.prepare("SELECT test_case_id FROM test_suite_cases WHERE suite_id = ? ORDER BY sort_order ASC, id ASC").all(id) as Array<{ test_case_id: number }>;
+    const suiteCases = db.prepare("SELECT test_case_id FROM test_suite_cases WHERE suite_id = ? ORDER BY sort_order ASC, id ASC").all(suiteId) as Array<{ test_case_id: number }>;
     if (suiteCases.length === 0) {
       return res.status(400).json({ error: "Suite has no test cases" });
     }
 
-    const existingRun = db.prepare("SELECT id FROM suite_runs WHERE suite_id = ? AND status = 'Running' ORDER BY started_at DESC LIMIT 1").get(id);
+    const existingRun = db.prepare(`
+      SELECT id
+      FROM execution_tasks
+      WHERE suite_id = ? AND status IN ('Queued', 'Running')
+      ORDER BY started_at DESC
+      LIMIT 1
+    `).get(suiteId);
     if (existingRun) {
       return res.status(409).json({ error: "Suite is already running" });
     }
 
-    const info = db.prepare(`
-      INSERT INTO suite_runs (suite_id, status, total_cases, current_case_id)
-      VALUES (?, 'Queued', ?, ?)
-    `).run(id, suiteCases.length, suiteCases[0].test_case_id);
-    const suiteRunId = Number(info.lastInsertRowid);
-
-    broadcast({
-      type: "SUITE_RUN_STARTED",
-      suiteRunId,
-      suiteId: Number(id),
-      totalCases: suiteCases.length,
+    const taskId = createExecutionTask({
+      type: "suite",
+      suiteId,
+      testCaseIds: suiteCases.map(item => item.test_case_id),
+      initiatedBy: "User",
+      stopOnFailure: Boolean(stop_on_failure),
     });
+    scheduleExecutionTask(taskId);
 
-    scheduleSuiteRun(suiteRunId, Number(id));
-    res.json({ id: suiteRunId, success: true });
+    res.json({ id: taskId, success: true });
   });
 
   app.get("/api/assets", (req, res) => {

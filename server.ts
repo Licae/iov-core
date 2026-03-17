@@ -66,12 +66,29 @@ type ExecutionTaskItemRecord = {
   test_input?: string | null;
   test_tool?: string | null;
   expected_result?: string | null;
+  steps?: string | null;
+  executor_type?: string | null;
+  script_path?: string | null;
+  command_template?: string | null;
+  args_template?: string | null;
+  timeout_sec?: number | null;
+  asset_name?: string | null;
+  connection_address?: string | null;
+};
+
+type StepExecutionResult = {
+  name: string;
+  result: "Passed" | "Failed" | "Blocked" | "Running" | "Skipped";
+  logs?: string;
+  duration?: number;
 };
 
 type ExecutorResult = {
   result: "Passed" | "Failed" | "Blocked";
   duration: number;
   logs: string;
+  summary?: string;
+  stepResults?: StepExecutionResult[];
 };
 
 type TaskExecutor = (
@@ -87,7 +104,7 @@ type ExecutorAdapter = {
   run: TaskExecutor;
 };
 
-const EXECUTION_MODE = process.env.EXECUTION_MODE === "script" ? "script" : process.env.EXECUTION_MODE === "python" ? "python" : "simulate";
+const EXECUTION_MODE = process.env.EXECUTION_MODE === "script" ? "script" : process.env.EXECUTION_MODE === "shell" ? "script" : process.env.EXECUTION_MODE === "simulate" ? "simulate" : "python";
 const EXECUTION_SCRIPT = process.env.EXECUTION_SCRIPT;
 const PYTHON_EXECUTABLE = process.env.PYTHON_EXECUTABLE || "python3";
 const PYTHON_SECURITY_RUNNER = process.env.PYTHON_SECURITY_RUNNER || path.join(process.cwd(), "scripts", "security_runner.py");
@@ -386,6 +403,11 @@ db.exec(`
     test_tool TEXT,
     expected_result TEXT,
     automation_level TEXT,
+    executor_type TEXT DEFAULT 'python',
+    script_path TEXT,
+    command_template TEXT,
+    args_template TEXT,
+    timeout_sec INTEGER DEFAULT 300,
     status TEXT DEFAULT 'Draft',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
@@ -395,6 +417,8 @@ db.exec(`
     test_case_id INTEGER,
     result TEXT,            -- Pass, Fail, Blocked
     logs TEXT,
+    summary TEXT,
+    step_results TEXT,
     duration INTEGER,       -- In seconds
     executed_by TEXT,
     executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -479,7 +503,7 @@ db.exec(`
     initiated_by TEXT,
     error_message TEXT,
     stop_on_failure INTEGER NOT NULL DEFAULT 0,
-    executor TEXT DEFAULT 'simulate',
+    executor TEXT DEFAULT 'python',
     source_task_id INTEGER,
     retry_count INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(asset_id) REFERENCES assets(id),
@@ -523,10 +547,16 @@ try {
 }
 
 // Migration: Add new columns if they don't exist
-const columns = ['test_input', 'test_tool', 'expected_result', 'automation_level'];
+const columns = ['test_input', 'test_tool', 'expected_result', 'automation_level', 'executor_type', 'script_path', 'command_template', 'args_template', 'timeout_sec'];
 columns.forEach(col => {
   try {
     db.exec(`ALTER TABLE test_cases ADD COLUMN ${col} TEXT;`);
+  } catch (e) {}
+});
+
+['summary', 'step_results'].forEach(col => {
+  try {
+    db.exec(`ALTER TABLE test_runs ADD COLUMN ${col} TEXT;`);
   } catch (e) {}
 });
 
@@ -552,7 +582,7 @@ try {
   // Ignore error if column already exists
 }
 
-["executor TEXT DEFAULT 'simulate'", "source_task_id INTEGER", "retry_count INTEGER NOT NULL DEFAULT 0"].forEach(definition => {
+["executor TEXT DEFAULT 'python'", "source_task_id INTEGER", "retry_count INTEGER NOT NULL DEFAULT 0"].forEach(definition => {
   const columnName = definition.split(" ")[0];
   try {
     db.exec(`ALTER TABLE execution_tasks ADD COLUMN ${definition};`);
@@ -682,6 +712,8 @@ async function startServer() {
         tc.expected_result,
         tr.result as run_result,
         tr.logs,
+        tr.summary,
+        tr.step_results,
         tr.duration,
         tr.executed_at
       FROM execution_task_items eti
@@ -823,15 +855,53 @@ async function startServer() {
     };
   };
 
-  const buildScriptCommand = (task: ExecutionTaskRecord, item: ExecutionTaskItemRecord) => {
-    if (!EXECUTION_SCRIPT) return null;
-    return EXECUTION_SCRIPT
+  const renderExecutorTemplate = (
+    template: string,
+    task: ExecutionTaskRecord,
+    item: ExecutionTaskItemRecord,
+    extra: Record<string, string> = {},
+  ) =>
+    template
       .replace(/\{\{taskId\}\}/g, String(task.id))
       .replace(/\{\{testCaseId\}\}/g, String(item.test_case_id))
       .replace(/\{\{suiteId\}\}/g, String(task.suite_id || ""))
       .replace(/\{\{assetId\}\}/g, String(task.asset_id || ""))
       .replace(/\{\{title\}\}/g, item.title)
-      .replace(/\{\{protocol\}\}/g, item.protocol || "");
+      .replace(/\{\{protocol\}\}/g, item.protocol || "")
+      .replace(/\{\{target\}\}/g, item.connection_address || "")
+      .replace(/\{\{assetName\}\}/g, item.asset_name || "")
+      .replace(/\{\{pythonExecutable\}\}/g, PYTHON_EXECUTABLE)
+      .replace(/\{\{payloadPath\}\}/g, extra.payloadPath || "");
+
+  const buildScriptCommand = (task: ExecutionTaskRecord, item: ExecutionTaskItemRecord) => {
+    const baseCommand = item.command_template || item.script_path || EXECUTION_SCRIPT;
+    if (!baseCommand) return null;
+    const rendered = renderExecutorTemplate(baseCommand, task, item);
+    const renderedArgs = renderExecutorTemplate(item.args_template || "", task, item);
+    return [rendered, renderedArgs].filter(Boolean).join(" ").trim();
+  };
+
+  const parseExecutorOutput = (result: ExecutorResult) => {
+    try {
+      const lines = result.logs.split("\n").filter(Boolean);
+      const lastJsonLine = [...lines].reverse().find((line) => {
+        const normalized = line.replace(/^\[(stdout|stderr)\]\s*/i, "").trim();
+        return normalized.startsWith("{") && normalized.endsWith("}");
+      });
+      if (!lastJsonLine) {
+        return result;
+      }
+      const parsed = JSON.parse(lastJsonLine.replace(/^\[(stdout|stderr)\]\s*/i, "").trim());
+      return {
+        result: parsed.result || result.result,
+        duration: Number(parsed.duration || result.duration),
+        logs: parsed.logs || result.logs,
+        summary: parsed.summary || parsed.logs || result.summary,
+        stepResults: Array.isArray(parsed.steps) ? parsed.steps : result.stepResults,
+      } as ExecutorResult;
+    } catch {
+      return result;
+    }
   };
 
   const spawnCommandExecutor = (
@@ -884,11 +954,11 @@ async function startServer() {
           });
           return;
         }
-        resolve({
+        resolve(parseExecutorOutput({
           result: code === 0 ? "Passed" : "Failed",
           duration,
           logs: output.join("\n") || `Script exited with code ${code ?? -1}`,
-        });
+        }));
       });
     });
 
@@ -917,37 +987,32 @@ async function startServer() {
     };
     writeFileSync(payloadPath, JSON.stringify(payload, null, 2), "utf8");
 
-      const command = `${PYTHON_EXECUTABLE} ${PYTHON_SECURITY_RUNNER} ${payloadPath}`;
-    return spawnCommandExecutor(command, task, item, broadcastEvent, registerChild).then((result) => {
-      try {
-        const lines = result.logs.split("\n").filter(Boolean);
-        const lastJsonLine = [...lines].reverse().find(line => line.trim().startsWith("{") && line.trim().endsWith("}"));
-        if (lastJsonLine) {
-          const parsed = JSON.parse(lastJsonLine);
-          return {
-            result: parsed.result || result.result,
-            duration: Number(parsed.duration || result.duration),
-            logs: parsed.logs || result.logs,
-          } as ExecutorResult;
-        }
-      } catch (error) {
-        // Fall back to raw output.
-      } finally {
-        rmSync(tempDir, { recursive: true, force: true });
-      }
-      return result;
+    const pythonScript = item.script_path || PYTHON_SECURITY_RUNNER;
+    const command = item.command_template
+      ? [
+          renderExecutorTemplate(item.command_template, task, item, { payloadPath }),
+          renderExecutorTemplate(item.args_template || "", task, item, { payloadPath }),
+        ].filter(Boolean).join(" ").trim()
+      : [
+          PYTHON_EXECUTABLE,
+          pythonScript,
+          renderExecutorTemplate(item.args_template || "{{payloadPath}}", task, item, { payloadPath }),
+        ].filter(Boolean).join(" ").trim();
+    return spawnCommandExecutor(command, task, item, broadcastEvent, registerChild).finally(() => {
+      rmSync(tempDir, { recursive: true, force: true });
     });
   };
 
   const adapterRegistry: ExecutorAdapter[] = [
     {
       name: "shell",
-      matches: (_task, item) => Boolean(item.test_tool?.startsWith("shell:")) || EXECUTION_MODE === "script",
+      matches: (_task, item) => item.executor_type === "shell" || Boolean(item.test_tool?.startsWith("shell:")) || EXECUTION_MODE === "script",
       run: shellExecutor,
     },
     {
       name: "python",
       matches: (_task, item) => {
+        if (item.executor_type === "python") return true;
         const tool = (item.test_tool || "").toLowerCase();
         const signature = [item.title, item.category, item.description, item.test_input, item.test_tool]
           .filter(Boolean)
@@ -1029,9 +1094,19 @@ async function startServer() {
         tc.description,
         tc.test_input,
         tc.test_tool,
-        tc.expected_result
+        tc.expected_result,
+        tc.steps,
+        tc.executor_type,
+        tc.script_path,
+        tc.command_template,
+        tc.args_template,
+        tc.timeout_sec,
+        a.name as asset_name,
+        a.connection_address
       FROM execution_task_items eti
       JOIN test_cases tc ON tc.id = eti.test_case_id
+      LEFT JOIN execution_tasks et ON et.id = eti.task_id
+      LEFT JOIN assets a ON a.id = et.asset_id
       WHERE eti.task_id = ?
       ORDER BY eti.sort_order ASC, eti.id ASC
     `).all(taskId) as ExecutionTaskItemRecord[];
@@ -1098,7 +1173,7 @@ async function startServer() {
           task: db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId),
         });
         const refreshedTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord;
-        const { result, duration, logs } = await runTaskItem(refreshedTask, item, (child) => {
+        const { result, duration, logs, summary, stepResults } = await runTaskItem(refreshedTask, item, (child) => {
           if (child) {
             activeTaskChildren.set(taskId, child);
           } else {
@@ -1112,9 +1187,17 @@ async function startServer() {
         }
 
         const runInfo = db.prepare(`
-          INSERT INTO test_runs (test_case_id, result, logs, duration, executed_by)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(item.test_case_id, result, logs, duration, refreshedTask.type === "suite" ? "Task-Orchestrator" : "Auto-Runner");
+          INSERT INTO test_runs (test_case_id, result, logs, summary, step_results, duration, executed_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          item.test_case_id,
+          result,
+          logs,
+          summary || "",
+          stepResults ? JSON.stringify(stepResults) : null,
+          duration,
+          refreshedTask.type === "suite" ? "Task-Orchestrator" : "Auto-Runner"
+        );
 
         db.prepare("UPDATE test_cases SET status = ? WHERE id = ?").run(result, item.test_case_id);
         db.prepare(`
@@ -1464,18 +1547,37 @@ async function startServer() {
   });
 
   app.post("/api/test-cases", (req, res) => {
-    const { title, category, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level } = req.body;
+    const { title, category, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec } = req.body;
     const info = db.prepare(
-      "INSERT INTO test_cases (title, category, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run(title, category, type, protocol, description, JSON.stringify(steps), test_input, test_tool, expected_result, automation_level);
+      `INSERT INTO test_cases (
+        title, category, type, protocol, description, steps, test_input, test_tool,
+        expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      title,
+      category,
+      type,
+      protocol,
+      description,
+      JSON.stringify(steps),
+      test_input,
+      test_tool,
+      expected_result,
+      automation_level,
+      executor_type || "python",
+      script_path || "",
+      command_template || "",
+      args_template || "",
+      Number(timeout_sec || 300)
+    );
     res.json({ id: info.lastInsertRowid });
   });
 
   app.post("/api/test-cases/import", (req, res) => {
     const { cases } = req.body;
     const insert = db.prepare(`
-      INSERT INTO test_cases (category, title, test_input, test_tool, steps, expected_result, automation_level, type, protocol, description)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO test_cases (category, title, test_input, test_tool, steps, expected_result, automation_level, type, protocol, description, executor_type, script_path, command_template, args_template, timeout_sec)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const transaction = db.transaction((items) => {
@@ -1506,7 +1608,12 @@ async function startServer() {
           item.automation_level || "B",
           type,
           protocol,
-          item.description || ""
+          item.description || "",
+          item.executor_type || "python",
+          item.script_path || "",
+          item.command_template || "",
+          item.args_template || "",
+          Number(item.timeout_sec || 300)
         );
       }
     });
@@ -1517,12 +1624,30 @@ async function startServer() {
 
   app.patch("/api/test-cases/:id", (req, res) => {
     const { id } = req.params;
-    const { title, category, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level } = req.body;
+    const { title, category, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec } = req.body;
     db.prepare(
       `UPDATE test_cases
-       SET title = ?, category = ?, type = ?, protocol = ?, description = ?, steps = ?, test_input = ?, test_tool = ?, expected_result = ?, automation_level = ?
+       SET title = ?, category = ?, type = ?, protocol = ?, description = ?, steps = ?, test_input = ?, test_tool = ?, expected_result = ?, automation_level = ?,
+           executor_type = ?, script_path = ?, command_template = ?, args_template = ?, timeout_sec = ?
        WHERE id = ?`
-    ).run(title, category, type, protocol, description, JSON.stringify(steps), test_input, test_tool, expected_result, automation_level, id);
+    ).run(
+      title,
+      category,
+      type,
+      protocol,
+      description,
+      JSON.stringify(steps),
+      test_input,
+      test_tool,
+      expected_result,
+      automation_level,
+      executor_type || "python",
+      script_path || "",
+      command_template || "",
+      args_template || "",
+      Number(timeout_sec || 300),
+      id
+    );
     res.json({ success: true });
   });
 

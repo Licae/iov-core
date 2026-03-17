@@ -54,6 +54,11 @@ interface TestCase {
   test_tool?: string;
   expected_result?: string;
   automation_level?: string;
+  executor_type?: string;
+  script_path?: string;
+  command_template?: string;
+  args_template?: string;
+  timeout_sec?: number;
   status: string;
   created_at: string;
   steps?: string; // JSON string
@@ -64,9 +69,18 @@ interface TestRun {
   test_case_id: number;
   result: string;
   logs: string;
+  summary?: string;
+  step_results?: string;
   duration: number;
   executed_by: string;
   executed_at: string;
+}
+
+interface StepExecutionResult {
+  name: string;
+  result: string;
+  logs?: string;
+  duration?: number;
 }
 
 interface RecentRun {
@@ -163,6 +177,8 @@ interface ExecutionTaskDetailItem {
   expected_result?: string | null;
   run_result?: string | null;
   logs?: string | null;
+  summary?: string | null;
+  step_results?: string | null;
   duration?: number | null;
   executed_at?: string | null;
 }
@@ -288,7 +304,7 @@ export default function App() {
     pr_requires_sil: true
   });
   const [runningSuiteIds, setRunningSuiteIds] = useState<number[]>([]);
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [theme, setTheme] = useState<'dark' | 'light'>('light');
 
   const filteredTestCases = testCases.filter(tc => {
     const matchesSearch = tc.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
@@ -299,7 +315,7 @@ export default function App() {
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem('iov-core-theme') as 'dark' | 'light' | null;
-    const preferredTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    const preferredTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'light' : 'light';
     const nextTheme = savedTheme || preferredTheme;
     setTheme(nextTheme);
   }, []);
@@ -393,6 +409,28 @@ export default function App() {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}分 ${secs}秒`;
+  };
+
+  const formatServerDateTime = (value?: string | null) => {
+    if (!value) return '-';
+    const normalized = value.includes('T')
+      ? (value.endsWith('Z') ? value : `${value}Z`)
+      : `${value.replace(' ', 'T')}Z`;
+    const parsed = new Date(normalized);
+    if (Number.isNaN(parsed.getTime())) {
+      return value;
+    }
+    return parsed.toLocaleString('zh-CN', { hour12: false });
+  };
+
+  const parseStepResults = (value?: string | null): StepExecutionResult[] => {
+    if (!value) return [];
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
   };
 
   const addToast = (message: string, type: 'success' | 'error') => {
@@ -625,7 +663,12 @@ export default function App() {
       test_input: formData.get('test_input'),
       test_tool: formData.get('test_tool'),
       expected_result: formData.get('expected_result'),
-      automation_level: formData.get('automation_level')
+      automation_level: formData.get('automation_level'),
+      executor_type: formData.get('executor_type'),
+      script_path: formData.get('script_path'),
+      command_template: formData.get('command_template'),
+      args_template: formData.get('args_template'),
+      timeout_sec: formData.get('timeout_sec'),
     };
 
     try {
@@ -685,7 +728,12 @@ export default function App() {
       test_input: formData.get('test_input'),
       test_tool: formData.get('test_tool'),
       expected_result: formData.get('expected_result'),
-      automation_level: formData.get('automation_level')
+      automation_level: formData.get('automation_level'),
+      executor_type: formData.get('executor_type'),
+      script_path: formData.get('script_path'),
+      command_template: formData.get('command_template'),
+      args_template: formData.get('args_template'),
+      timeout_sec: formData.get('timeout_sec'),
     };
 
     try {
@@ -695,10 +743,16 @@ export default function App() {
         body: JSON.stringify(updatedCase)
       });
       if (res.ok) {
+        const patchedCase = {
+          ...selectedTestCase,
+          ...updatedCase,
+          timeout_sec: Number(updatedCase.timeout_sec || selectedTestCase.timeout_sec || 300),
+          steps: JSON.stringify(steps),
+        } as TestCase;
         addToast('测试用例已更新', 'success');
         fetchData();
+        setSelectedTestCase(patchedCase);
         setShowEditModal(false);
-        setSelectedTestCase(null);
       }
     } catch (error) {
       addToast('更新失败', 'error');
@@ -714,7 +768,7 @@ export default function App() {
     const cases = dataLines.map(line => {
       const parts = line.split('|').map(p => p.trim()).filter(p => p !== '');
       if (parts.length < 7) return null;
-      if (parts.length >= 9) {
+      if (parts.length >= 15) {
         return {
           category: parts[0],
           title: parts[1],
@@ -726,6 +780,30 @@ export default function App() {
           expected_result: parts[7],
           automation_level: parts[8],
           description: parts[9] || '',
+          executor_type: parts[10] || 'python',
+          script_path: parts[11] || '',
+          command_template: parts[12] || '',
+          args_template: parts[13] || '',
+          timeout_sec: parts[14] || '300',
+        };
+      }
+      if (parts.length >= 10) {
+        return {
+          category: parts[0],
+          title: parts[1],
+          protocol: parts[2],
+          type: parts[3],
+          test_input: parts[4],
+          test_tool: parts[5],
+          steps: parts[6],
+          expected_result: parts[7],
+          automation_level: parts[8],
+          description: parts[9] || '',
+          executor_type: 'python',
+          script_path: '',
+          command_template: '',
+          args_template: '',
+          timeout_sec: '300',
         };
       }
       return {
@@ -735,7 +813,12 @@ export default function App() {
         test_tool: parts[3],
         steps: parts[4],
         expected_result: parts[5],
-        automation_level: parts[6]
+        automation_level: parts[6],
+        executor_type: 'python',
+        script_path: '',
+        command_template: '',
+        args_template: '',
+        timeout_sec: '300',
       };
     }).filter(c => c !== null);
 
@@ -764,6 +847,7 @@ export default function App() {
       if (res.ok) {
         addToast('测试用例已删除', 'success');
         fetchData();
+        setShowEditModal(false);
         setSelectedTestCase(null);
       }
     } catch (error) {
@@ -941,7 +1025,7 @@ export default function App() {
   return (
     <div className="flex h-screen bg-bg text-text-primary overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-64 border-r border-border flex flex-col bg-bg z-20">
+      <aside className="w-64 border-r border-border flex flex-col bg-bg z-20 app-sidebar">
         <div className="p-8">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 bg-accent rounded flex items-center justify-center">
@@ -974,7 +1058,7 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 flex flex-col overflow-hidden">
         {/* Top Bar */}
-        <header className="h-16 border-b border-border flex items-center justify-between px-8 bg-bg/80 backdrop-blur-md z-10">
+        <header className="h-16 border-b border-border flex items-center justify-between px-8 bg-bg/80 backdrop-blur-md z-10 app-topbar">
           <div className="flex items-center gap-2 text-sm">
             <span className="text-text-secondary">平台</span>
             <ChevronRight size={14} className="text-muted" />
@@ -1094,7 +1178,7 @@ export default function App() {
               {/* Main Dashboard Layout */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 {/* Recent Executions */}
-                <div className="lg:col-span-2 glass-card overflow-hidden">
+                <div className="lg:col-span-2 glass-card overflow-hidden dashboard-panel">
                   <div className="p-6 border-b border-border flex justify-between items-center">
                     <h3 className="font-bold">最近测试执行</h3>
                     <button className="text-xs text-accent font-bold flex items-center gap-1 hover:underline">
@@ -1102,7 +1186,7 @@ export default function App() {
                     </button>
                   </div>
                   <div className="overflow-x-auto">
-                    <table className="w-full text-left">
+                    <table className="w-full text-left data-table">
                       <thead>
                         <tr>
                           <th className="table-header">目标资产</th>
@@ -1344,8 +1428,8 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="glass-card overflow-hidden">
-                <table className="w-full text-left">
+              <div className="glass-card overflow-hidden table-shell">
+                <table className="w-full text-left data-table">
                   <thead>
                     <tr className="border-b border-border bg-white/2">
                       <th className="px-6 py-4 text-[10px] font-bold uppercase text-muted tracking-widest w-16">序号</th>
@@ -1422,7 +1506,7 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <div className="glass-card overflow-hidden">
+                <div className="glass-card overflow-hidden table-shell">
                   <div className="p-6 border-b border-border flex items-center justify-between">
                     <h3 className="font-bold">已定义套件</h3>
                     <span className="text-[10px] text-muted uppercase font-bold">{testSuites.length} 个套件</span>
@@ -1465,7 +1549,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="glass-card overflow-hidden">
+                <div className="glass-card overflow-hidden table-shell">
                   <div className="p-6 border-b border-border flex items-center justify-between">
                     <h3 className="font-bold">最近套件执行</h3>
                     <span className="text-[10px] text-muted uppercase font-bold">实时刷新</span>
@@ -1563,7 +1647,7 @@ export default function App() {
                           <span>通过: {task.passed_items}</span>
                           <span>失败: {task.failed_items}</span>
                           <span>{task.stop_on_failure ? '策略: 失败即停' : '策略: 全部执行'}</span>
-                          <span>执行器: {task.executor || 'simulate'}</span>
+                          <span>执行器: {task.executor || 'python'}</span>
                           <span className="text-accent">{task.current_case_title ? `当前: ${task.current_case_title}` : '等待调度'}</span>
                         </div>
                         {task.error_message && (
@@ -1648,7 +1732,7 @@ export default function App() {
                           </div>
                         </div>
                         <div className="flex items-center gap-4 text-[10px] text-muted font-mono">
-                          <span>执行器: {task.executor || 'simulate'}</span>
+                          <span>执行器: {task.executor || 'python'}</span>
                           <span>{task.stop_on_failure ? '策略: 失败即停' : '策略: 全部执行'}</span>
                           <span>通过: {task.passed_items}</span>
                           <span>失败: {task.failed_items}</span>
@@ -1689,8 +1773,8 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="glass-card overflow-hidden">
-                <table className="w-full text-left">
+              <div className="glass-card overflow-hidden table-shell">
+                <table className="w-full text-left data-table">
                   <thead>
                     <tr className="bg-white/[0.02] text-[10px] uppercase tracking-widest font-bold text-muted">
                       <th className="py-4 px-8 border-b border-border">缺陷 ID</th>
@@ -1933,7 +2017,7 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-md p-8 bg-card"
+              className="glass-card w-full max-w-md p-8 bg-card modal-surface"
             >
               <div className="flex justify-between items-start mb-6">
                 <h3 className="text-xl font-bold tracking-tighter uppercase">新建测试用例</h3>
@@ -2003,6 +2087,31 @@ export default function App() {
                   <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">描述</label>
                   <textarea name="description" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none h-16" placeholder="简述测试目的..." />
                 </div>
+                <div className="rounded-xl border border-border bg-white/2 p-4 space-y-4">
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">执行器类型</label>
+                    <select name="executor_type" defaultValue="python" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
+                      <option value="python">python</option>
+                      <option value="shell">shell</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">脚本路径</label>
+                    <input name="script_path" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" placeholder="例如：scripts/security_runner.py" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">命令模板</label>
+                    <input name="command_template" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" placeholder="例如：{{pythonExecutable}} {{script_path}} {{payloadPath}}" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">参数模板</label>
+                    <input name="args_template" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" placeholder="例如：{{payloadPath}} 或 --host {{target}}" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">超时 (秒)</label>
+                    <input name="timeout_sec" defaultValue="300" type="number" min="1" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
+                  </div>
+                </div>
                 <div>
                   <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试步骤 (每行一步)</label>
                   <textarea name="steps" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none h-32" placeholder="步骤 1: ...&#10;步骤 2: ..." />
@@ -2024,7 +2133,7 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-md p-8 bg-card"
+              className="glass-card w-full max-w-md p-8 bg-card modal-surface"
             >
               <div className="flex justify-between items-start mb-6">
                 <h3 className="text-xl font-bold tracking-tighter uppercase">发起测试任务</h3>
@@ -2183,7 +2292,7 @@ export default function App() {
                   value={importText}
                   onChange={(e) => setImportText(e.target.value)}
                   className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none h-64 scrollbar-hide"
-                  placeholder="| 目标模块/业务域 | 用例名称 | 测试协议 | 测试类型 | 测试输入 | 测试工具 | 测试步骤 | 预期结果 | 自动化等级 | 描述 |&#10;| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |&#10;| IVI | SSH访问控制验证 | Ethernet | Automated | 白名单IP/非法IP | SSH | 步骤1\\n步骤2 | 仅授权账号允许登录 | A | 验证IVI SSH访问控制 |"
+                  placeholder="| 目标模块/业务域 | 用例名称 | 测试协议 | 测试类型 | 测试输入 | 测试工具 | 测试步骤 | 预期结果 | 自动化等级 | 描述 | 执行器类型 | 脚本路径 | 命令模板 | 参数模板 | 超时秒数 |&#10;| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |&#10;| IVI | SSH访问控制验证 | Ethernet | Automated | 白名单IP/非法IP | SSH | 步骤1\\n步骤2 | 仅授权账号允许登录 | A | 验证IVI SSH访问控制 | python | scripts/security_runner.py | {{pythonExecutable}} {{script_path}} {{payloadPath}} | {{payloadPath}} | 300 |"
                 />
                 <div className="flex gap-3 pt-4">
                   <button 
@@ -2206,97 +2315,6 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Edit Test Case Modal */}
-      <AnimatePresence>
-        {showEditModal && selectedTestCase && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-md p-8 bg-card"
-            >
-              <div className="flex justify-between items-start mb-6">
-                <h3 className="text-xl font-bold tracking-tighter uppercase">编辑测试用例</h3>
-                <button onClick={() => setShowEditModal(false)} className="text-muted hover:text-white">
-                  <XCircle size={24} />
-                </button>
-              </div>
-
-              <form onSubmit={editTestCase} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 scrollbar-hide">
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">用例名称</label>
-                  <input name="title" required defaultValue={selectedTestCase.title} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">目标模块 / 业务域</label>
-                    <select name="category" defaultValue={selectedTestCase.category} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      {CASE_CATEGORY_OPTIONS.map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </select>
-                    <div className="text-[10px] text-muted mt-1">只表示测试覆盖对象或业务域，不等于具体执行资产。</div>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试协议</label>
-                    <select name="protocol" defaultValue={selectedTestCase.protocol} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="CAN">CAN</option>
-                      <option value="DoIP">DoIP</option>
-                      <option value="Ethernet">Ethernet</option>
-                      <option value="OTA">OTA</option>
-                      <option value="V2X">V2X</option>
-                      <option value="BLE">BLE</option>
-                    </select>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试类型</label>
-                    <select name="type" defaultValue={selectedTestCase.type} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="Automated">自动化 (Automated)</option>
-                      <option value="Manual">手动 (Manual)</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">自动化等级</label>
-                    <select name="automation_level" defaultValue={selectedTestCase.automation_level || 'B'} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="A">A (完全自动)</option>
-                      <option value="B">B (半自动)</option>
-                      <option value="C">C (人工交互)</option>
-                      <option value="D">D (无法自动)</option>
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试工具</label>
-                  <input name="test_tool" defaultValue={selectedTestCase.test_tool} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试输入</label>
-                  <input name="test_input" defaultValue={selectedTestCase.test_input} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">预期结果</label>
-                  <textarea name="expected_result" defaultValue={selectedTestCase.expected_result} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none h-16" />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">描述</label>
-                  <textarea name="description" defaultValue={selectedTestCase.description} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none h-16" />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试步骤 (每行一步)</label>
-                  <textarea name="steps" defaultValue={JSON.parse(selectedTestCase.steps || '[]').join('\n')} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none h-32" />
-                </div>
-                <button type="submit" className="w-full bg-accent py-3 rounded-lg text-xs font-bold uppercase mt-4 hover:bg-[#4433EE] transition-colors">
-                  保存修改
-                </button>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
       {/* Register Asset Modal */}
       <AnimatePresence>
         {showAssetModal && (
@@ -2305,7 +2323,7 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-md p-8 bg-card"
+              className="glass-card w-full max-w-md p-8 bg-card modal-surface"
             >
               <div className="flex justify-between items-start mb-6">
                 <h3 className="text-xl font-bold tracking-tighter uppercase">注册新资产</h3>
@@ -2363,7 +2381,7 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-lg p-8 bg-card"
+              className="glass-card w-full max-w-lg p-8 bg-card modal-surface"
             >
               <div className="flex justify-between items-start mb-6">
                 <div className="flex items-center gap-4">
@@ -2473,7 +2491,7 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-md p-8 bg-card"
+              className="glass-card w-full max-w-md p-8 bg-card modal-surface"
             >
               <div className="flex justify-between items-start mb-6">
                 <h3 className="text-xl font-bold tracking-tighter uppercase">编辑资产</h3>
@@ -2552,7 +2570,7 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.96 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.96 }}
-              className="glass-card w-full max-w-4xl max-h-[88vh] overflow-hidden bg-card"
+              className="glass-card w-full max-w-4xl max-h-[88vh] overflow-hidden bg-card modal-surface"
             >
               <div className="flex items-start justify-between p-6 border-b border-border">
                 <div>
@@ -2560,7 +2578,7 @@ export default function App() {
                     {selectedTaskDetail.task.type === 'suite' ? selectedTaskDetail.task.suite_name : selectedTaskDetail.task.test_case_title || `任务 #${selectedTaskDetail.task.id}`}
                   </h3>
                   <p className="text-[10px] text-muted uppercase font-bold tracking-widest mt-2">
-                    任务 #{selectedTaskDetail.task.id} • {selectedTaskDetail.task.type === 'suite' ? '套件任务' : '单用例任务'} • {selectedTaskDetail.task.executor || 'simulate'}
+                    任务 #{selectedTaskDetail.task.id} • {selectedTaskDetail.task.type === 'suite' ? '套件任务' : '单用例任务'} • {selectedTaskDetail.task.executor || 'python'}
                   </p>
                 </div>
                 <button onClick={() => setSelectedTaskDetail(null)} className="text-muted hover:text-white">
@@ -2591,11 +2609,11 @@ export default function App() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
                   <div className="p-4 rounded-xl bg-white/2 border border-border">
                     <div className="text-[10px] text-muted uppercase font-bold mb-1">开始时间</div>
-                    <div>{selectedTaskDetail.task.started_at ? new Date(selectedTaskDetail.task.started_at).toLocaleString() : '-'}</div>
+                    <div>{formatServerDateTime(selectedTaskDetail.task.started_at)}</div>
                   </div>
                   <div className="p-4 rounded-xl bg-white/2 border border-border">
                     <div className="text-[10px] text-muted uppercase font-bold mb-1">结束时间</div>
-                    <div>{selectedTaskDetail.task.finished_at ? new Date(selectedTaskDetail.task.finished_at).toLocaleString() : '-'}</div>
+                    <div>{formatServerDateTime(selectedTaskDetail.task.finished_at)}</div>
                   </div>
                   <div className="p-4 rounded-xl bg-white/2 border border-border">
                     <div className="text-[10px] text-muted uppercase font-bold mb-1">通过/失败</div>
@@ -2652,17 +2670,35 @@ export default function App() {
                         </div>
 
                         <div className="grid grid-cols-3 gap-3 text-[10px] text-muted font-mono">
-                          <div>开始: {item.started_at ? new Date(item.started_at).toLocaleString() : '-'}</div>
-                          <div>结束: {item.finished_at ? new Date(item.finished_at).toLocaleString() : '-'}</div>
+                          <div>开始: {formatServerDateTime(item.started_at)}</div>
+                          <div>结束: {formatServerDateTime(item.finished_at)}</div>
                           <div>耗时: {item.duration ? formatDuration(item.duration) : '--'}</div>
                         </div>
 
                         <div className="rounded-xl border border-border bg-black/20 p-3">
                           <div className="text-[10px] text-muted uppercase font-bold mb-2">执行日志</div>
                           <pre className="text-[11px] leading-relaxed whitespace-pre-wrap break-words text-text-secondary">
-                            {item.logs || '当前任务没有返回日志。若是刚启动，请等待执行器回传结果。'}
+                            {item.summary || item.logs || '当前任务没有返回日志。若是刚启动，请等待执行器回传结果。'}
                           </pre>
                         </div>
+
+                        {parseStepResults(item.step_results).length > 0 && (
+                          <div className="rounded-xl border border-border bg-white/2 p-3 space-y-2">
+                            <div className="text-[10px] text-muted uppercase font-bold mb-1">脚本返回步骤结果</div>
+                            {parseStepResults(item.step_results).map((step, index) => (
+                              <div key={`${item.id}-${index}`} className="flex items-start justify-between gap-3 rounded-lg border border-border bg-white/2 px-3 py-2">
+                                <div className="text-xs text-text-secondary">{step.name}</div>
+                                <span className={`text-[10px] font-bold uppercase ${
+                                  step.result === 'Passed' ? 'text-success' :
+                                  step.result === 'Failed' ? 'text-danger' :
+                                  step.result === 'Blocked' ? 'text-warning' : 'text-muted'
+                                }`}>
+                                  {step.result}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -2681,7 +2717,10 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setSelectedTestCase(null)}
+              onClick={() => {
+                setShowEditModal(false);
+                setSelectedTestCase(null);
+              }}
               className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60]"
             />
             <motion.div
@@ -2689,7 +2728,7 @@ export default function App() {
               animate={{ x: 0 }}
               exit={{ x: '100%' }}
               transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="fixed right-0 top-0 bottom-0 w-full max-w-xl bg-bg border-l border-border z-[70] flex flex-col shadow-2xl"
+              className="fixed right-0 top-0 bottom-0 w-full max-w-xl bg-bg border-l border-border z-[70] flex flex-col shadow-2xl drawer-surface"
             >
               <div className="p-6 border-b border-border flex justify-between items-center">
                 <div className="flex items-center gap-3">
@@ -2697,183 +2736,339 @@ export default function App() {
                     {selectedTestCase.category === 'T-Box' ? <Cpu size={20} className="text-accent" /> : <Car size={20} className="text-accent" />}
                   </div>
                   <div>
-                    <h3 className="font-bold text-lg leading-tight">{selectedTestCase.title}</h3>
-                    <p className="text-xs text-muted uppercase tracking-wider font-bold">{selectedTestCase.category} • {selectedTestCase.protocol}</p>
+                    <h3 className="font-bold text-lg leading-tight">{showEditModal ? '编辑测试用例' : selectedTestCase.title}</h3>
+                    <p className="text-xs text-muted uppercase tracking-wider font-bold">
+                      {showEditModal ? '在当前抽屉内直接修改内容' : `${selectedTestCase.category} • ${selectedTestCase.protocol}`}
+                    </p>
                   </div>
                 </div>
-                <button onClick={() => setSelectedTestCase(null)} className="p-2 hover:bg-white/5 rounded-full transition-colors">
+                <button
+                  onClick={() => {
+                    setShowEditModal(false);
+                    setSelectedTestCase(null);
+                  }}
+                  className="p-2 hover:bg-white/5 rounded-full transition-colors"
+                >
                   <XCircle size={24} className="text-muted" />
                 </button>
               </div>
 
-              <div className="flex-1 overflow-y-auto p-8 space-y-8">
-                {/* Actions */}
-                <div className="flex gap-3">
-                  <button 
-                    onClick={() => runSimulation(selectedTestCase.id)}
-                    disabled={isRunningSimulation || selectedTestCase.status === 'Running'}
-                    className={`flex-1 py-3 rounded-xl font-bold text-xs uppercase flex items-center justify-center gap-2 transition-all ${
-                      isRunningSimulation || selectedTestCase.status === 'Running'
-                        ? 'bg-white/5 text-muted cursor-not-allowed'
-                        : 'bg-accent text-white hover:bg-[#4433EE] shadow-lg shadow-accent/20'
-                    }`}
-                  >
-                    {isRunningSimulation ? (
-                      <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}>
-                        <Activity size={16} />
-                      </motion.div>
-                    ) : <PlayCircle size={16} />}
-                    {isRunningSimulation ? '正在执行模拟...' : '立即执行测试'}
-                  </button>
-                  <button 
-                    onClick={() => setShowEditModal(true)}
-                    className="px-4 py-3 rounded-xl border border-border font-bold text-xs uppercase hover:bg-white/5 transition-colors flex items-center gap-2"
-                  >
-                    <Edit3 size={16} />
-                    编辑用例
-                  </button>
-                  <button 
-                    onClick={() => deleteTestCase(selectedTestCase.id)}
-                    className="px-4 py-3 rounded-xl border border-danger/20 text-danger font-bold text-xs uppercase hover:bg-danger/5 transition-colors"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
+              <form onSubmit={editTestCase} className="flex-1 overflow-y-auto p-8 space-y-8 scrollbar-hide">
+                  {/* Actions */}
+                  <div className="flex gap-3">
+                    {showEditModal ? (
+                      <>
+                        <button
+                          type="submit"
+                          className="flex-1 py-3 rounded-xl bg-accent text-white font-bold text-xs uppercase hover:bg-[#4433EE] transition-colors"
+                        >
+                          保存修改
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowEditModal(false)}
+                          className="px-4 py-3 rounded-xl border border-border font-bold text-xs uppercase hover:bg-white/5 transition-colors"
+                        >
+                          取消编辑
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button 
+                          type="button"
+                          onClick={() => runSimulation(selectedTestCase.id)}
+                          disabled={isRunningSimulation || selectedTestCase.status === 'Running'}
+                          className={`flex-1 py-3 rounded-xl font-bold text-xs uppercase flex items-center justify-center gap-2 transition-all ${
+                            isRunningSimulation || selectedTestCase.status === 'Running'
+                              ? 'bg-white/5 text-muted cursor-not-allowed'
+                              : 'bg-accent text-white hover:bg-[#4433EE] shadow-lg shadow-accent/20'
+                          }`}
+                        >
+                          {isRunningSimulation ? (
+                            <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}>
+                              <Activity size={16} />
+                            </motion.div>
+                          ) : <PlayCircle size={16} />}
+                          {isRunningSimulation ? '正在执行模拟...' : '立即执行测试'}
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={() => setShowEditModal(true)}
+                          className="px-4 py-3 rounded-xl border border-border font-bold text-xs uppercase hover:bg-white/5 transition-colors flex items-center gap-2"
+                        >
+                          <Edit3 size={16} />
+                          编辑用例
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={() => deleteTestCase(selectedTestCase.id)}
+                          className="px-4 py-3 rounded-xl border border-danger/20 text-danger font-bold text-xs uppercase hover:bg-danger/5 transition-colors"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </>
+                    )}
+                  </div>
 
-                {/* Simulation Terminal */}
-                {isRunningSimulation && (
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-center">
-                      <h4 className="text-xs font-bold text-muted uppercase tracking-widest">实时仿真终端</h4>
-                      <div className="flex items-center gap-2">
-                        <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
-                        <span className="text-[10px] text-accent font-bold">报文流同步中...</span>
+                  {/* Simulation Terminal */}
+                  {!showEditModal && isRunningSimulation && (
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-center">
+                        <h4 className="text-xs font-bold text-muted uppercase tracking-widest">实时仿真终端</h4>
+                        <div className="flex items-center gap-2">
+                          <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+                          <span className="text-[10px] text-accent font-bold">报文流同步中...</span>
+                        </div>
+                      </div>
+                      <div className="bg-black/40 rounded-xl border border-white/5 p-4 font-mono text-[10px] space-y-1 h-48 overflow-y-auto scrollbar-hide">
+                        {simulationLogs.length === 0 ? (
+                          <div className="text-muted italic">等待报文流...</div>
+                        ) : (
+                          simulationLogs.map((log, i) => (
+                            <div key={i} className="flex gap-3">
+                              <span className="text-muted">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
+                              <span className="text-accent">{log.message}</span>
+                            </div>
+                          ))
+                        )}
                       </div>
                     </div>
-                    <div className="bg-black/40 rounded-xl border border-white/5 p-4 font-mono text-[10px] space-y-1 h-48 overflow-y-auto scrollbar-hide">
-                      {simulationLogs.length === 0 ? (
-                        <div className="text-muted italic">等待报文流...</div>
+                  )}
+
+                  {/* Info Grid */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="p-4 rounded-xl bg-white/2 border border-border">
+                      <div className="text-[10px] text-muted uppercase font-bold mb-1">当前状态</div>
+                      <div className="flex items-center gap-2">
+                        <div className={`w-2 h-2 rounded-full ${
+                          selectedTestCase.status === 'Passed' ? 'bg-success' :
+                          selectedTestCase.status === 'Failed' ? 'bg-danger' :
+                          selectedTestCase.status === 'Running' ? 'bg-accent' : 'bg-warning'
+                        }`} />
+                        <span className="font-bold text-sm">{selectedTestCase.status}</span>
+                      </div>
+                    </div>
+                    <div className="p-4 rounded-xl bg-white/2 border border-border">
+                      <div className="text-[10px] text-muted uppercase font-bold mb-1">
+                        {showEditModal ? '用例名称' : '自动化等级'}
+                      </div>
+                      {showEditModal ? (
+                        <input name="title" required defaultValue={selectedTestCase.title} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:border-accent" />
                       ) : (
-                        simulationLogs.map((log, i) => (
-                          <div key={i} className="flex gap-3">
-                            <span className="text-muted">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
-                            <span className="text-accent">{log.message}</span>
+                        <div className="font-bold text-sm">{selectedTestCase.automation_level || 'B'}</div>
+                      )}
+                    </div>
+                    <div className="p-4 rounded-xl bg-white/2 border border-border">
+                      <div className="text-[10px] text-muted uppercase font-bold mb-1">
+                        {showEditModal ? '测试工具' : '测试工具'}
+                      </div>
+                      {showEditModal ? (
+                        <input name="test_tool" defaultValue={selectedTestCase.test_tool} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" />
+                      ) : (
+                        <div className="font-bold text-sm font-mono text-accent">{selectedTestCase.test_tool || '-'}</div>
+                      )}
+                    </div>
+                    <div className="p-4 rounded-xl bg-white/2 border border-border">
+                      <div className="text-[10px] text-muted uppercase font-bold mb-1">测试类型</div>
+                      {showEditModal ? (
+                        <select name="type" defaultValue={selectedTestCase.type} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
+                          <option value="Automated">自动化 (Automated)</option>
+                          <option value="Manual">手动 (Manual)</option>
+                        </select>
+                      ) : (
+                        <div className="font-bold text-sm">{selectedTestCase.type}</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {showEditModal && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="p-4 rounded-xl bg-white/2 border border-border">
+                        <div className="text-[10px] text-muted uppercase font-bold mb-2">目标模块 / 业务域</div>
+                        <select name="category" defaultValue={selectedTestCase.category} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
+                          {CASE_CATEGORY_OPTIONS.map((option) => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="p-4 rounded-xl bg-white/2 border border-border">
+                        <div className="text-[10px] text-muted uppercase font-bold mb-2">测试协议</div>
+                        <select name="protocol" defaultValue={selectedTestCase.protocol} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
+                          <option value="CAN">CAN</option>
+                          <option value="DoIP">DoIP</option>
+                          <option value="Ethernet">Ethernet</option>
+                          <option value="OTA">OTA</option>
+                          <option value="V2X">V2X</option>
+                          <option value="BLE">BLE</option>
+                        </select>
+                      </div>
+                      <div className="p-4 rounded-xl bg-white/2 border border-border">
+                        <div className="text-[10px] text-muted uppercase font-bold mb-2">自动化等级</div>
+                        <select name="automation_level" defaultValue={selectedTestCase.automation_level || 'B'} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
+                          <option value="A">A (完全自动)</option>
+                          <option value="B">B (半自动)</option>
+                          <option value="C">C (人工交互)</option>
+                          <option value="D">D (无法自动)</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {(selectedTestCase.expected_result || showEditModal) && (
+                    <div className="space-y-3">
+                      <h4 className="text-xs uppercase font-bold text-muted tracking-widest">预期结果</h4>
+                      {showEditModal ? (
+                        <textarea name="expected_result" defaultValue={selectedTestCase.expected_result} className="w-full bg-bg border border-border rounded-xl px-4 py-3 text-sm leading-relaxed min-h-28 focus:outline-none focus:border-accent" />
+                      ) : (
+                        <div className="text-sm text-emerald-400 leading-relaxed bg-emerald-500/5 p-4 rounded-xl border border-emerald-500/10">
+                          {selectedTestCase.expected_result}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {(selectedTestCase.test_input || showEditModal) && (
+                    <div className="space-y-3">
+                      <h4 className="text-xs uppercase font-bold text-muted tracking-widest">测试输入</h4>
+                      {showEditModal ? (
+                        <textarea name="test_input" defaultValue={selectedTestCase.test_input} className="w-full bg-bg border border-border rounded-xl px-4 py-3 text-sm leading-relaxed min-h-24 font-mono focus:outline-none focus:border-accent" />
+                      ) : (
+                        <div className="text-sm text-text-secondary leading-relaxed bg-white/2 p-4 rounded-xl border border-border font-mono">
+                          {selectedTestCase.test_input}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="space-y-3">
+                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">用例描述</h4>
+                    {showEditModal ? (
+                      <textarea name="description" defaultValue={selectedTestCase.description} className="w-full bg-bg border border-border rounded-xl px-4 py-3 text-sm leading-relaxed min-h-24 focus:outline-none focus:border-accent" />
+                    ) : (
+                      <p className="text-sm text-text-secondary leading-relaxed bg-white/2 p-4 rounded-xl border border-border">
+                        {selectedTestCase.description}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-3">
+                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">执行配置</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="p-4 rounded-xl bg-white/2 border border-border">
+                        <div className="text-[10px] text-muted uppercase font-bold mb-1">执行器</div>
+                        {showEditModal ? (
+                          <select name="executor_type" defaultValue={selectedTestCase.executor_type || 'python'} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
+                            <option value="python">python</option>
+                            <option value="shell">shell</option>
+                          </select>
+                        ) : (
+                          <div className="font-bold text-sm">{selectedTestCase.executor_type || 'python'}</div>
+                        )}
+                      </div>
+                      <div className="p-4 rounded-xl bg-white/2 border border-border">
+                        <div className="text-[10px] text-muted uppercase font-bold mb-1">超时</div>
+                        {showEditModal ? (
+                          <input name="timeout_sec" defaultValue={selectedTestCase.timeout_sec || 300} type="number" min="1" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
+                        ) : (
+                          <div className="font-bold text-sm">{selectedTestCase.timeout_sec || 300}s</div>
+                        )}
+                      </div>
+                      <div className="p-4 rounded-xl bg-white/2 border border-border col-span-2">
+                        <div className="text-[10px] text-muted uppercase font-bold mb-1">命令/脚本</div>
+                        {showEditModal ? (
+                          <div className="space-y-3">
+                            <input name="script_path" defaultValue={selectedTestCase.script_path || ''} type="text" placeholder="脚本路径" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" />
+                            <input name="command_template" defaultValue={selectedTestCase.command_template || ''} type="text" placeholder="命令模板" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" />
+                          </div>
+                        ) : (
+                          <div className="font-mono text-sm break-all">{selectedTestCase.command_template || selectedTestCase.script_path || '-'}</div>
+                        )}
+                      </div>
+                      <div className="p-4 rounded-xl bg-white/2 border border-border col-span-2">
+                        <div className="text-[10px] text-muted uppercase font-bold mb-1">参数模板</div>
+                        {showEditModal ? (
+                          <textarea name="args_template" defaultValue={selectedTestCase.args_template || ''} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono min-h-20 focus:outline-none focus:border-accent" />
+                        ) : (
+                          <div className="font-mono text-sm break-all">{selectedTestCase.args_template || '-'}</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">测试步骤</h4>
+                    {showEditModal ? (
+                      <textarea name="steps" defaultValue={JSON.parse(selectedTestCase.steps || '[]').join('\n')} className="w-full bg-bg border border-border rounded-xl px-4 py-3 text-sm font-mono min-h-40 focus:outline-none focus:border-accent" />
+                    ) : (
+                      <div className="space-y-2">
+                        {(() => {
+                          try {
+                            const steps = JSON.parse(selectedTestCase.steps || '[]');
+                            return steps.map((step: string, index: number) => (
+                              <div key={index} className="flex gap-3 items-start p-3 rounded-xl bg-white/2 border border-border">
+                                <div className="w-5 h-5 rounded-full bg-accent/20 text-accent flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
+                                  {index + 1}
+                                </div>
+                                <span className="text-sm text-text-secondary">{step}</span>
+                              </div>
+                            ));
+                          } catch (e) {
+                            return <div className="text-xs text-muted italic">无法解析测试步骤</div>;
+                          }
+                        })()}
+                      </div>
+                    )}
+                  </div>
+
+                  {!showEditModal && (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center">
+                      <h4 className="text-xs uppercase font-bold text-muted tracking-widest">执行历史</h4>
+                      {isHistoryLoading && <Activity size={14} className="animate-spin text-accent" />}
+                    </div>
+                    
+                    <div className="space-y-3">
+                      {history.length === 0 ? (
+                        <div className="text-center py-8 text-muted text-sm italic">暂无执行记录</div>
+                      ) : (
+                        history.map((run) => (
+                          <div key={run.id} className="p-4 rounded-xl border border-border bg-white/2 hover:bg-white/5 transition-colors group">
+                            <div className="flex justify-between items-start mb-2">
+                              <div className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                run.result === 'Passed' ? 'bg-success/20 text-success' :
+                                run.result === 'Failed' ? 'bg-danger/20 text-danger' : 'bg-warning/20 text-warning'
+                              }`}>
+                                {run.result}
+                              </div>
+                              <span className="text-[10px] text-muted font-mono">{formatServerDateTime(run.executed_at)}</span>
+                            </div>
+                            <p className="text-xs text-text-secondary line-clamp-2 group-hover:line-clamp-none transition-all">
+                              {run.summary || run.logs || '无详细日志内容'}
+                            </p>
+                            {parseStepResults(run.step_results).length > 0 && (
+                              <div className="mt-3 space-y-2">
+                                {parseStepResults(run.step_results).map((step, index) => (
+                                  <div key={`${run.id}-${index}`} className="flex items-start justify-between gap-3 rounded-lg border border-border bg-white/2 px-3 py-2">
+                                    <div className="text-[11px] text-text-secondary">{step.name}</div>
+                                    <span className={`text-[10px] font-bold uppercase ${
+                                      step.result === 'Passed' ? 'text-success' :
+                                      step.result === 'Failed' ? 'text-danger' :
+                                      step.result === 'Blocked' ? 'text-warning' : 'text-muted'
+                                    }`}>
+                                      {step.result}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            <div className="mt-2 text-[10px] text-muted font-bold">执行人: {run.executed_by}</div>
                           </div>
                         ))
                       )}
                     </div>
                   </div>
-                )}
-
-                {/* Info Grid */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">当前状态</div>
-                    <div className="flex items-center gap-2">
-                      <div className={`w-2 h-2 rounded-full ${
-                        selectedTestCase.status === 'Passed' ? 'bg-success' :
-                        selectedTestCase.status === 'Failed' ? 'bg-danger' :
-                        selectedTestCase.status === 'Running' ? 'bg-accent' : 'bg-warning'
-                      }`} />
-                      <span className="font-bold text-sm">{selectedTestCase.status}</span>
-                    </div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">自动化等级</div>
-                    <div className="font-bold text-sm">{selectedTestCase.automation_level || 'B'}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">测试工具</div>
-                    <div className="font-bold text-sm font-mono text-accent">{selectedTestCase.test_tool || '-'}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">测试类型</div>
-                    <div className="font-bold text-sm">{selectedTestCase.type}</div>
-                  </div>
-                </div>
-
-                {/* Expected Result */}
-                {selectedTestCase.expected_result && (
-                  <div className="space-y-3">
-                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">预期结果</h4>
-                    <div className="text-sm text-emerald-400 leading-relaxed bg-emerald-500/5 p-4 rounded-xl border border-emerald-500/10">
-                      {selectedTestCase.expected_result}
-                    </div>
-                  </div>
-                )}
-
-                {/* Test Input */}
-                {selectedTestCase.test_input && (
-                  <div className="space-y-3">
-                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">测试输入</h4>
-                    <div className="text-sm text-text-secondary leading-relaxed bg-white/2 p-4 rounded-xl border border-border font-mono">
-                      {selectedTestCase.test_input}
-                    </div>
-                  </div>
-                )}
-
-                {/* Description */}
-                <div className="space-y-3">
-                  <h4 className="text-xs uppercase font-bold text-muted tracking-widest">用例描述</h4>
-                  <p className="text-sm text-text-secondary leading-relaxed bg-white/2 p-4 rounded-xl border border-border">
-                    {selectedTestCase.description}
-                  </p>
-                </div>
-
-                {/* Steps */}
-                <div className="space-y-4">
-                  <h4 className="text-xs uppercase font-bold text-muted tracking-widest">测试步骤</h4>
-                  <div className="space-y-2">
-                    {(() => {
-                      try {
-                        const steps = JSON.parse(selectedTestCase.steps || '[]');
-                        return steps.map((step: string, index: number) => (
-                          <div key={index} className="flex gap-3 items-start p-3 rounded-xl bg-white/2 border border-border">
-                            <div className="w-5 h-5 rounded-full bg-accent/20 text-accent flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
-                              {index + 1}
-                            </div>
-                            <span className="text-sm text-text-secondary">{step}</span>
-                          </div>
-                        ));
-                      } catch (e) {
-                        return <div className="text-xs text-muted italic">无法解析测试步骤</div>;
-                      }
-                    })()}
-                  </div>
-                </div>
-
-                {/* History */}
-                <div className="space-y-4">
-                  <div className="flex justify-between items-center">
-                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">执行历史</h4>
-                    {isHistoryLoading && <Activity size={14} className="animate-spin text-accent" />}
-                  </div>
-                  
-                  <div className="space-y-3">
-                    {history.length === 0 ? (
-                      <div className="text-center py-8 text-muted text-sm italic">暂无执行记录</div>
-                    ) : (
-                      history.map((run) => (
-                        <div key={run.id} className="p-4 rounded-xl border border-border bg-white/2 hover:bg-white/5 transition-colors group">
-                          <div className="flex justify-between items-start mb-2">
-                            <div className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                              run.result === 'Passed' ? 'bg-success/20 text-success' :
-                              run.result === 'Failed' ? 'bg-danger/20 text-danger' : 'bg-warning/20 text-warning'
-                            }`}>
-                              {run.result}
-                            </div>
-                            <span className="text-[10px] text-muted font-mono">{new Date(run.executed_at).toLocaleString()}</span>
-                          </div>
-                          <p className="text-xs text-text-secondary line-clamp-2 group-hover:line-clamp-none transition-all">
-                            {run.logs || '无详细日志内容'}
-                          </p>
-                          <div className="mt-2 text-[10px] text-muted font-bold">执行人: {run.executed_by}</div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
+                  )}
+              </form>
             </motion.div>
           </>
         )}

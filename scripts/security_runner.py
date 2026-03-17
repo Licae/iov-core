@@ -74,10 +74,18 @@ def main() -> int:
     time.sleep(0.15)
     log(f"[SECURITY] Assessment: {assessment['reason']}")
 
+    step_results = [
+        {"name": "装载测试用例与环境检查", "result": "Passed", "logs": "用例载入完成，基础运行环境可用。", "duration": 1},
+        {"name": "策略与攻击面扫描", "result": "Passed" if assessment["result"] != "Blocked" else "Blocked", "logs": f"Protocol={assessment['protocol']} Category={assessment['category']}", "duration": 1},
+        {"name": "安全结论判定", "result": assessment["result"], "logs": assessment["reason"], "duration": 1},
+    ]
+
     result_payload = {
         "result": assessment["result"],
         "duration": 2,
+        "summary": assessment["reason"],
         "logs": f"{title}: {assessment['reason']}",
+        "steps": step_results,
     }
     print(json.dumps(result_payload), flush=True)
     return 0 if assessment["result"] == "Passed" else 1

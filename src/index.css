@@ -137,6 +137,10 @@ html[data-theme="light"] .dashboard-panel {
 .badge-warning { @apply badge bg-warning/20 text-warning; }
 .badge-danger { @apply badge bg-danger/20 text-danger; }
 .badge-info { @apply badge bg-accent/20 text-accent; }
+.badge-queued { @apply badge bg-slate-500/20 text-slate-400; }
+.badge-running { @apply badge bg-accent/20 text-accent; }
+.badge-completed { @apply badge bg-slate-600/20 text-slate-300; }
+.badge-cancelled { @apply badge bg-slate-500/20 text-slate-400; }
 
 html[data-theme="light"] .text-white {
   color: var(--color-text-primary) !important;
@@ -223,6 +227,22 @@ html[data-theme="light"] .badge-danger {
 
 html[data-theme="light"] .badge-info {
   background-color: rgba(49, 86, 232, 0.12);
+}
+
+html[data-theme="light"] .badge-queued,
+html[data-theme="light"] .badge-cancelled {
+  background-color: rgba(100, 116, 139, 0.12);
+  color: #64748b;
+}
+
+html[data-theme="light"] .badge-running {
+  background-color: rgba(49, 86, 232, 0.12);
+  color: #3156e8;
+}
+
+html[data-theme="light"] .badge-completed {
+  background-color: rgba(71, 85, 105, 0.12);
+  color: #475569;
 }
 
 html[data-theme="light"] aside,

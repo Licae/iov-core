@@ -1,0 +1,16 @@
+﻿优先级,原表用例,平台用例标题,建议脚本类型,当前状态,说明
+P0,ADB访问测试,ADB访问控制验证,python,已接入,已存在并接入平台，可直接执行。
+P0,SSH访问测试,SSH访问控制验证,python,已接入,已存在并接入平台，可直接执行。
+P0,Telnet访问测试,Telnet访问测试,python,已接入,已创建脚本骨架，适合作为远程接入面基线检查。
+P0,FTP访问测试,FTP访问测试,python,已接入,已创建脚本骨架，先覆盖匿名和探测账号登录路径。
+P0,ADB Push测试,ADB Push测试,python,已接入,已创建脚本骨架，默认目标路径为 /data/local/tmp/iov_probe.txt。
+P0,ADB pull测试,ADB pull测试,python,已接入,已创建脚本骨架，默认拉取 /system/build.prop。
+P1,系统日志测试,系统日志测试,python,待接入,建议统一成日志关键字扫描框架，复用 ADB/SSH 上下文。
+P1,Dmesg日志测试,Dmesg日志测试,shell,待接入,单命令型检查，适合 shell。
+P1,OTA升级日志,OTA升级日志,python,待接入,建议与系统日志测试共用规则引擎。
+P1,SELinux策略测试,SELinux策略测试,shell,待接入,读取 getenforce/sestatus 即可。
+P1,iptables防火墙检测,iptables防火墙检测,shell,待接入,建议兼容 nftables。
+P1,ASLR测试,ASLR测试,shell,待接入,读取 /proc/sys/kernel/randomize_va_space。
+P1,最小权限测试,最小权限测试,python,待接入,通常需要组合多条命令与目录权限检查。
+P1,系统证书保护测试,系统证书保护测试,python,待接入,建议做成证书/密钥目录扫描与权限校验。
+P1,开放端口扫描,开放端口扫描,shell,待接入,适合用 nmap 或 nc 做白名单扫描。

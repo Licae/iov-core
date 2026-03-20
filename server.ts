@@ -6,9 +6,9 @@ import { WebSocketServer, WebSocket } from "ws";
 import http from "http";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
-import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
-import os from "os";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "child_process";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
+import net from "net";
 
 dotenv.config();
 
@@ -31,10 +31,14 @@ type SuiteRunProgress = {
   blockedCases: number;
 };
 
+type ExecutionStatus = "PENDING" | "RUNNING" | "COMPLETED" | "CANCELLED";
+type TestResult = "PASSED" | "FAILED" | "BLOCKED" | "ERROR";
+type FailureCategory = "NONE" | "ENVIRONMENT" | "PERMISSION" | "SCRIPT";
+
 type ExecutionTaskRecord = {
   id: number;
   type: "single" | "suite";
-  status: "Queued" | "Running" | "Completed" | "Failed" | "Cancelled";
+  status: ExecutionStatus;
   asset_id?: number | null;
   suite_id?: number | null;
   test_case_id?: number | null;
@@ -53,6 +57,10 @@ type ExecutionTaskRecord = {
   executor?: string | null;
   source_task_id?: number | null;
   retry_count?: number;
+  runtime_inputs?: string | null;
+  failure_category?: FailureCategory | string | null;
+  can_retry?: boolean;
+  retry_block_reason?: string | null;
 };
 
 type ExecutionTaskItemRecord = {
@@ -72,23 +80,103 @@ type ExecutionTaskItemRecord = {
   command_template?: string | null;
   args_template?: string | null;
   timeout_sec?: number | null;
+  required_inputs?: string | null;
+  default_runtime_inputs?: string | null;
   asset_name?: string | null;
   connection_address?: string | null;
 };
 
 type StepExecutionResult = {
   name: string;
-  result: "Passed" | "Failed" | "Blocked" | "Running" | "Skipped";
+  result: "PASSED" | "FAILED" | "BLOCKED" | "ERROR" | "RUNNING" | "SKIPPED";
   logs?: string;
   duration?: number;
+  command?: string;
+  command_result?: "PASSED" | "FAILED" | "BLOCKED" | "ERROR" | "RUNNING" | "SKIPPED";
+  output?: string;
+  security_assessment?: string;
+  exit_code?: number | null;
+  stdout?: string;
+  stderr?: string;
+  timestamp?: string;
+  conclusion?: string;
+};
+
+type CommandEvidence = {
+  command: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  startedAt: string;
+  finishedAt: string;
+  signal?: NodeJS.Signals | null;
 };
 
 type ExecutorResult = {
-  result: "Passed" | "Failed" | "Blocked";
+  result: TestResult;
   duration: number;
   logs: string;
   summary?: string;
   stepResults?: StepExecutionResult[];
+  failureCategory?: FailureCategory;
+  evidence?: CommandEvidence;
+};
+
+const EXECUTION_STATUS = {
+  PENDING: "PENDING" as ExecutionStatus,
+  RUNNING: "RUNNING" as ExecutionStatus,
+  COMPLETED: "COMPLETED" as ExecutionStatus,
+  CANCELLED: "CANCELLED" as ExecutionStatus,
+};
+
+const TEST_RESULT = {
+  PASSED: "PASSED" as TestResult,
+  FAILED: "FAILED" as TestResult,
+  BLOCKED: "BLOCKED" as TestResult,
+  ERROR: "ERROR" as TestResult,
+};
+
+const FAILURE_CATEGORY = {
+  NONE: "NONE" as FailureCategory,
+  ENVIRONMENT: "ENVIRONMENT" as FailureCategory,
+  PERMISSION: "PERMISSION" as FailureCategory,
+  SCRIPT: "SCRIPT" as FailureCategory,
+};
+
+const normalizeExecutionStatus = (value?: string | null): ExecutionStatus => {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "RUNNING") return EXECUTION_STATUS.RUNNING;
+  if (normalized === "COMPLETED" || normalized === "FAILED") return EXECUTION_STATUS.COMPLETED;
+  if (normalized === "CANCELLED") return EXECUTION_STATUS.CANCELLED;
+  return EXECUTION_STATUS.PENDING;
+};
+
+const normalizeTestResult = (value?: string | null, fallback: TestResult = TEST_RESULT.ERROR): TestResult => {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "PASSED") return TEST_RESULT.PASSED;
+  if (normalized === "FAILED") return TEST_RESULT.FAILED;
+  if (normalized === "BLOCKED") return TEST_RESULT.BLOCKED;
+  if (normalized === "ERROR") return TEST_RESULT.ERROR;
+  return fallback;
+};
+
+const normalizeStepResult = (value?: string | null): StepExecutionResult["result"] => {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "PASSED") return "PASSED";
+  if (normalized === "FAILED") return "FAILED";
+  if (normalized === "BLOCKED") return "BLOCKED";
+  if (normalized === "ERROR") return "ERROR";
+  if (normalized === "RUNNING") return "RUNNING";
+  if (normalized === "SKIPPED") return "SKIPPED";
+  return "ERROR";
+};
+
+const normalizeFailureCategory = (value?: string | null): FailureCategory => {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "ENVIRONMENT") return FAILURE_CATEGORY.ENVIRONMENT;
+  if (normalized === "PERMISSION") return FAILURE_CATEGORY.PERMISSION;
+  if (normalized === "SCRIPT") return FAILURE_CATEGORY.SCRIPT;
+  return FAILURE_CATEGORY.NONE;
 };
 
 type TaskExecutor = (
@@ -108,6 +196,56 @@ const EXECUTION_MODE = process.env.EXECUTION_MODE === "script" ? "script" : proc
 const EXECUTION_SCRIPT = process.env.EXECUTION_SCRIPT;
 const PYTHON_EXECUTABLE = process.env.PYTHON_EXECUTABLE || "python3";
 const PYTHON_SECURITY_RUNNER = process.env.PYTHON_SECURITY_RUNNER || path.join(process.cwd(), "scripts", "security_runner.py");
+const MAX_TASK_RETRIES = Number(process.env.MAX_TASK_RETRIES ?? "3");
+const ARTIFACT_ROOT = path.resolve(process.cwd(), process.env.RUNTIME_ARTIFACTS_DIR || "runtime-artifacts");
+const ARTIFACT_SUBDIRS = ["payloads", "adb-push", "adb-pull", "logs"] as const;
+const ARTIFACT_RETENTION_HOURS_PASS = Number(process.env.ARTIFACT_RETENTION_HOURS_PASS ?? "0");
+const ARTIFACT_RETENTION_HOURS_FAIL = Number(process.env.ARTIFACT_RETENTION_HOURS_FAIL ?? "24");
+const ARTIFACT_RETENTION_HOURS_CANCEL = Number(process.env.ARTIFACT_RETENTION_HOURS_CANCEL ?? "2");
+const ARTIFACT_MAX_SIZE_MB = Number(process.env.ARTIFACT_MAX_SIZE_MB ?? "2048");
+const ARTIFACT_MAX_DIRS = Number(process.env.ARTIFACT_MAX_DIRS ?? "5000");
+const ARTIFACT_CLEAN_ON_START = process.env.ARTIFACT_CLEAN_ON_START !== "false";
+const SECURITY_BASELINE_SUITE_NAME = process.env.SECURITY_BASELINE_SUITE_NAME || "系统安全基线套件";
+const SECURITY_BASELINE_CASE_TITLES = [
+  "ADB访问控制验证",
+  "SSH访问控制验证",
+  "Telnet访问测试",
+  "FTP访问测试",
+  "ADB Push测试",
+  "ADB pull测试",
+  "系统日志测试",
+  "Dmesg日志测试",
+  "OTA升级日志",
+  "SELinux策略测试",
+  "ASLR测试",
+  "iptables防火墙检测",
+  "最小权限测试",
+  "系统证书保护测试",
+  "开放端口扫描",
+  "SSH root 登录禁用检查",
+  "SSH 空口令/弱口令策略检查",
+  "Telnet 服务禁用检查",
+  "FTP 匿名登录禁用检查",
+  "关键目录权限检查",
+  "可疑 SUID/SGID 文件扫描",
+  "TLS 证书有效期与主机名校验",
+  "TLS 弱加密套件检查",
+  "升级包存储安全",
+  "升级包非法获取",
+  "OTA降级测试",
+  "OTA日志安全",
+  "APK logcat日志",
+  "控车日志测试",
+  "系统提权测试",
+  "系统版本测试",
+  "未授权应用安装测试",
+  "强制访问控制测试",
+  "GPS信息保护测试",
+  "VIN信息保护测试",
+  "OTA升级包保护测试",
+  "代码保护测试",
+  "账户锁定",
+];
 
 const escapeHtml = (value: string) =>
   value
@@ -133,6 +271,143 @@ const buildFallbackDefectAnalysis = (defect: DefectRecord) => {
     `2. 在相同输入条件下复现问题，确认是否只在特定负载、时序或协议版本下出现。`,
     `3. ${severityActions[defect.severity] || "补充模块级日志后再次执行回归测试，确认问题边界。"}`
   ].join("\n");
+};
+
+const taskArtifactPaths = new Map<number, Set<string>>();
+const taskArtifactCleanupTimers = new Map<number, NodeJS.Timeout>();
+
+const safePositiveNumber = (value: number, fallback: number) =>
+  Number.isFinite(value) && value >= 0 ? value : fallback;
+
+const ensureArtifactDirectories = () => {
+  mkdirSync(ARTIFACT_ROOT, { recursive: true });
+  ARTIFACT_SUBDIRS.forEach((dir) => mkdirSync(path.join(ARTIFACT_ROOT, dir), { recursive: true }));
+};
+
+const getPathSizeBytes = (targetPath: string): number => {
+  try {
+    const stats = statSync(targetPath);
+    if (stats.isFile()) return stats.size;
+    if (!stats.isDirectory()) return 0;
+    return readdirSync(targetPath).reduce((acc, entry) => acc + getPathSizeBytes(path.join(targetPath, entry)), 0);
+  } catch {
+    return 0;
+  }
+};
+
+const listManagedArtifactDirs = () => {
+  const entries: Array<{ path: string; mtimeMs: number; sizeBytes: number }> = [];
+  ARTIFACT_SUBDIRS.forEach((subdir) => {
+    const base = path.join(ARTIFACT_ROOT, subdir);
+    try {
+      readdirSync(base, { withFileTypes: true }).forEach((entry) => {
+        if (!entry.isDirectory()) return;
+        if (!entry.name.startsWith("task-")) return;
+        const fullPath = path.join(base, entry.name);
+        const stats = statSync(fullPath);
+        entries.push({
+          path: fullPath,
+          mtimeMs: stats.mtimeMs,
+          sizeBytes: getPathSizeBytes(fullPath),
+        });
+      });
+    } catch {
+      // ignore
+    }
+  });
+  return entries;
+};
+
+const deleteArtifactDir = (artifactPath: string) => {
+  try {
+    rmSync(artifactPath, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+};
+
+const enforceArtifactQuota = () => {
+  const maxSizeBytes = safePositiveNumber(ARTIFACT_MAX_SIZE_MB, 2048) * 1024 * 1024;
+  const maxDirs = safePositiveNumber(ARTIFACT_MAX_DIRS, 5000);
+  const dirs = listManagedArtifactDirs().sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let totalSize = dirs.reduce((acc, item) => acc + item.sizeBytes, 0);
+  let totalDirs = dirs.length;
+
+  for (const entry of dirs) {
+    if (totalSize <= maxSizeBytes && totalDirs <= maxDirs) break;
+    deleteArtifactDir(entry.path);
+    totalSize -= entry.sizeBytes;
+    totalDirs -= 1;
+  }
+};
+
+const cleanupExpiredArtifactsOnStart = () => {
+  if (!ARTIFACT_CLEAN_ON_START) return;
+  const maxRetentionHours = Math.max(
+    safePositiveNumber(ARTIFACT_RETENTION_HOURS_PASS, 0),
+    safePositiveNumber(ARTIFACT_RETENTION_HOURS_FAIL, 24),
+    safePositiveNumber(ARTIFACT_RETENTION_HOURS_CANCEL, 2)
+  );
+  const cutoff = Date.now() - maxRetentionHours * 60 * 60 * 1000;
+  listManagedArtifactDirs().forEach((entry) => {
+    if (entry.mtimeMs < cutoff) {
+      deleteArtifactDir(entry.path);
+    }
+  });
+  enforceArtifactQuota();
+};
+
+const registerTaskArtifactPath = (taskId: number, artifactPath: string) => {
+  const bucket = taskArtifactPaths.get(taskId) || new Set<string>();
+  bucket.add(artifactPath);
+  taskArtifactPaths.set(taskId, bucket);
+};
+
+const createTaskArtifactDir = (taskId: number, itemId: number, subdir: (typeof ARTIFACT_SUBDIRS)[number]) => {
+  const unique = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const dir = path.join(ARTIFACT_ROOT, subdir, `task-${taskId}-item-${itemId}-${unique}`);
+  mkdirSync(dir, { recursive: true });
+  registerTaskArtifactPath(taskId, dir);
+  return dir;
+};
+
+const getTaskArtifactRetentionMs = (task: ExecutionTaskRecord) => {
+  const passMs = safePositiveNumber(ARTIFACT_RETENTION_HOURS_PASS, 0) * 60 * 60 * 1000;
+  const failMs = safePositiveNumber(ARTIFACT_RETENTION_HOURS_FAIL, 24) * 60 * 60 * 1000;
+  const cancelMs = safePositiveNumber(ARTIFACT_RETENTION_HOURS_CANCEL, 2) * 60 * 60 * 1000;
+
+  if (task.status === EXECUTION_STATUS.CANCELLED) return cancelMs;
+  const hasFailure = Number(task.failed_items || 0) > 0 || Number(task.blocked_items || 0) > 0 || Boolean(task.error_message);
+  if (hasFailure) return failMs;
+  return passMs;
+};
+
+const scheduleTaskArtifactCleanup = (task: ExecutionTaskRecord) => {
+  const taskId = task.id;
+  const paths = Array.from(taskArtifactPaths.get(taskId) || []);
+  if (paths.length === 0) return;
+
+  const existingTimer = taskArtifactCleanupTimers.get(taskId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    taskArtifactCleanupTimers.delete(taskId);
+  }
+
+  const cleanupNow = () => {
+    paths.forEach((artifactPath) => deleteArtifactDir(artifactPath));
+    taskArtifactPaths.delete(taskId);
+    taskArtifactCleanupTimers.delete(taskId);
+    enforceArtifactQuota();
+  };
+
+  const retentionMs = getTaskArtifactRetentionMs(task);
+  if (retentionMs <= 0) {
+    cleanupNow();
+    return;
+  }
+
+  const timer = setTimeout(cleanupNow, retentionMs);
+  taskArtifactCleanupTimers.set(taskId, timer);
 };
 
 const generateDefectAnalysis = async (defect: DefectRecord) => {
@@ -172,9 +447,9 @@ const buildReportHtml = () => {
       COUNT(*) as totalCases,
       SUM(CASE WHEN type = 'Automated' THEN 1 ELSE 0 END) as automatedCases,
       SUM(CASE WHEN type = 'Manual' THEN 1 ELSE 0 END) as manualCases,
-      SUM(CASE WHEN status = 'Passed' THEN 1 ELSE 0 END) as passedCases,
-      SUM(CASE WHEN status = 'Failed' THEN 1 ELSE 0 END) as failedCases,
-      SUM(CASE WHEN status = 'Running' THEN 1 ELSE 0 END) as runningCases
+      SUM(CASE WHEN UPPER(status) = 'PASSED' THEN 1 ELSE 0 END) as passedCases,
+      SUM(CASE WHEN UPPER(status) = 'FAILED' THEN 1 ELSE 0 END) as failedCases,
+      SUM(CASE WHEN UPPER(status) = 'RUNNING' THEN 1 ELSE 0 END) as runningCases
     FROM test_cases
   `).get() as Record<string, number>;
 
@@ -190,7 +465,7 @@ const buildReportHtml = () => {
     SELECT
       category,
       COUNT(*) as total,
-      SUM(CASE WHEN status = 'Passed' THEN 1 ELSE 0 END) as passed
+      SUM(CASE WHEN UPPER(status) = 'PASSED' THEN 1 ELSE 0 END) as passed
     FROM test_cases
     GROUP BY category
     ORDER BY category ASC
@@ -383,9 +658,9 @@ const buildReportHtml = () => {
 const buildSuiteRunProgress = (results: string[]): SuiteRunProgress =>
   results.reduce<SuiteRunProgress>((acc, result) => {
     acc.completedCases += 1;
-    if (result === "Passed") acc.passedCases += 1;
-    if (result === "Failed") acc.failedCases += 1;
-    if (result === "Blocked") acc.blockedCases += 1;
+    if (result === TEST_RESULT.PASSED) acc.passedCases += 1;
+    if (result === TEST_RESULT.FAILED || result === TEST_RESULT.ERROR) acc.failedCases += 1;
+    if (result === TEST_RESULT.BLOCKED) acc.blockedCases += 1;
     return acc;
   }, { completedCases: 0, passedCases: 0, failedCases: 0, blockedCases: 0 });
 
@@ -408,6 +683,7 @@ db.exec(`
     command_template TEXT,
     args_template TEXT,
     timeout_sec INTEGER DEFAULT 300,
+    default_runtime_inputs TEXT,
     status TEXT DEFAULT 'Draft',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
@@ -415,7 +691,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS test_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     test_case_id INTEGER,
-    result TEXT,            -- Pass, Fail, Blocked
+    result TEXT,            -- PASSED, FAILED, BLOCKED, ERROR
     logs TEXT,
     summary TEXT,
     step_results TEXT,
@@ -471,7 +747,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS suite_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     suite_id INTEGER NOT NULL,
-    status TEXT DEFAULT 'Queued',
+    status TEXT DEFAULT 'PENDING',
     total_cases INTEGER DEFAULT 0,
     completed_cases INTEGER DEFAULT 0,
     passed_cases INTEGER DEFAULT 0,
@@ -487,7 +763,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS execution_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'Queued',
+    status TEXT NOT NULL DEFAULT 'PENDING',
     asset_id INTEGER,
     suite_id INTEGER,
     test_case_id INTEGER,
@@ -504,8 +780,10 @@ db.exec(`
     error_message TEXT,
     stop_on_failure INTEGER NOT NULL DEFAULT 0,
     executor TEXT DEFAULT 'python',
+    runtime_inputs TEXT,
     source_task_id INTEGER,
     retry_count INTEGER NOT NULL DEFAULT 0,
+    failure_category TEXT NOT NULL DEFAULT 'NONE',
     FOREIGN KEY(asset_id) REFERENCES assets(id),
     FOREIGN KEY(suite_id) REFERENCES test_suites(id),
     FOREIGN KEY(test_case_id) REFERENCES test_cases(id),
@@ -518,8 +796,9 @@ db.exec(`
     task_id INTEGER NOT NULL,
     test_case_id INTEGER NOT NULL,
     sort_order INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'Queued',
+    status TEXT NOT NULL DEFAULT 'PENDING',
     result TEXT,
+    failure_category TEXT,
     run_id INTEGER,
     started_at DATETIME,
     finished_at DATETIME,
@@ -547,7 +826,7 @@ try {
 }
 
 // Migration: Add new columns if they don't exist
-const columns = ['test_input', 'test_tool', 'expected_result', 'automation_level', 'executor_type', 'script_path', 'command_template', 'args_template', 'timeout_sec'];
+const columns = ['test_input', 'test_tool', 'expected_result', 'automation_level', 'executor_type', 'script_path', 'command_template', 'args_template', 'timeout_sec', 'required_inputs', 'default_runtime_inputs'];
 columns.forEach(col => {
   try {
     db.exec(`ALTER TABLE test_cases ADD COLUMN ${col} TEXT;`);
@@ -566,6 +845,50 @@ columns.forEach(col => {
   } catch (e) {}
 });
 
+// Normalize execution status and test result values into canonical uppercase enums.
+db.exec(`
+  UPDATE execution_tasks
+  SET status = CASE UPPER(status)
+    WHEN 'QUEUED' THEN 'PENDING'
+    WHEN 'PENDING' THEN 'PENDING'
+    WHEN 'RUNNING' THEN 'RUNNING'
+    WHEN 'COMPLETED' THEN 'COMPLETED'
+    WHEN 'FAILED' THEN 'COMPLETED'
+    WHEN 'CANCELLED' THEN 'CANCELLED'
+    ELSE 'PENDING'
+  END;
+
+  UPDATE execution_task_items
+  SET status = CASE UPPER(status)
+    WHEN 'QUEUED' THEN 'PENDING'
+    WHEN 'PENDING' THEN 'PENDING'
+    WHEN 'RUNNING' THEN 'RUNNING'
+    WHEN 'COMPLETED' THEN 'COMPLETED'
+    WHEN 'CANCELLED' THEN 'CANCELLED'
+    ELSE 'PENDING'
+  END;
+
+  UPDATE test_runs
+  SET result = CASE UPPER(result)
+    WHEN 'PASSED' THEN 'PASSED'
+    WHEN 'FAILED' THEN 'FAILED'
+    WHEN 'BLOCKED' THEN 'BLOCKED'
+    WHEN 'RUNNING' THEN 'ERROR'
+    WHEN 'SKIPPED' THEN 'ERROR'
+    ELSE COALESCE(result, 'ERROR')
+  END;
+
+  UPDATE execution_task_items
+  SET result = CASE UPPER(result)
+    WHEN 'PASSED' THEN 'PASSED'
+    WHEN 'FAILED' THEN 'FAILED'
+    WHEN 'BLOCKED' THEN 'BLOCKED'
+    WHEN 'ERROR' THEN 'ERROR'
+    ELSE result
+  END
+  WHERE result IS NOT NULL;
+`);
+
 try {
   db.exec(`
     UPDATE assets
@@ -582,7 +905,7 @@ try {
   // Ignore error if column already exists
 }
 
-["executor TEXT DEFAULT 'python'", "source_task_id INTEGER", "retry_count INTEGER NOT NULL DEFAULT 0"].forEach(definition => {
+["executor TEXT DEFAULT 'python'", "runtime_inputs TEXT", "source_task_id INTEGER", "retry_count INTEGER NOT NULL DEFAULT 0"].forEach(definition => {
   const columnName = definition.split(" ")[0];
   try {
     db.exec(`ALTER TABLE execution_tasks ADD COLUMN ${definition};`);
@@ -591,7 +914,44 @@ try {
   }
 });
 
+["failure_category TEXT NOT NULL DEFAULT 'NONE'"].forEach(definition => {
+  try {
+    db.exec(`ALTER TABLE execution_tasks ADD COLUMN ${definition};`);
+  } catch (e) {
+    // Ignore error if column already exists
+  }
+});
+
+["failure_category TEXT"].forEach(definition => {
+  try {
+    db.exec(`ALTER TABLE execution_task_items ADD COLUMN ${definition};`);
+  } catch (e) {
+    // Ignore error if column already exists
+  }
+});
+
+db.exec(`
+  UPDATE execution_tasks
+  SET failure_category = CASE UPPER(COALESCE(failure_category, 'NONE'))
+    WHEN 'ENVIRONMENT' THEN 'ENVIRONMENT'
+    WHEN 'PERMISSION' THEN 'PERMISSION'
+    WHEN 'SCRIPT' THEN 'SCRIPT'
+    ELSE 'NONE'
+  END;
+
+  UPDATE execution_task_items
+  SET failure_category = CASE UPPER(COALESCE(failure_category, ''))
+    WHEN 'ENVIRONMENT' THEN 'ENVIRONMENT'
+    WHEN 'PERMISSION' THEN 'PERMISSION'
+    WHEN 'SCRIPT' THEN 'SCRIPT'
+    ELSE NULL
+  END;
+`);
+
 async function startServer() {
+  ensureArtifactDirectories();
+  cleanupExpiredArtifactsOnStart();
+
   const app = express();
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server });
@@ -650,6 +1010,437 @@ async function startServer() {
       });
     });
 
+  const parseJsonArray = (value?: string | null): string[] => {
+    if (!value) return [];
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.map((entry) => String(entry).trim()).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const parseJsonObject = (value?: string | null): Record<string, string> => {
+    if (!value) return {};
+    try {
+      const parsed = JSON.parse(value);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      return Object.fromEntries(
+        Object.entries(parsed as Record<string, unknown>)
+          .map(([key, raw]) => [key, String(raw ?? "").trim()] as const)
+          .filter(([, normalized]) => normalized !== "")
+      );
+    } catch {
+      return {};
+    }
+  };
+
+  const resolveTaskRuntimeInputs = (task: ExecutionTaskRecord, item: ExecutionTaskItemRecord) => {
+    const taskInputs = parseJsonObject(task.runtime_inputs);
+    const defaultInputs = parseJsonObject(item.default_runtime_inputs);
+    const merged = {
+      ...defaultInputs,
+      ...taskInputs,
+    };
+    if (!merged.connection_address && item.connection_address) {
+      merged.connection_address = String(item.connection_address).trim();
+    }
+    return merged;
+  };
+
+  const toSafeCommand = (value: string) => (/^[A-Za-z0-9._-]+$/.test(value) ? value : "");
+  const commandAvailabilityCache = new Map<string, { checkedAt: number; available: boolean; stdout: string; stderr: string }>();
+  const checkCommandAvailability = (command: string) => {
+    const normalized = toSafeCommand(command.trim());
+    if (!normalized) {
+      return { available: false, stdout: "", stderr: "invalid command name", exitCode: 1 };
+    }
+    const cached = commandAvailabilityCache.get(normalized);
+    if (cached && Date.now() - cached.checkedAt < 15_000) {
+      return { available: cached.available, stdout: cached.stdout, stderr: cached.stderr, exitCode: cached.available ? 0 : 1 };
+    }
+    const check = spawnSync("sh", ["-lc", `command -v ${normalized}`], { encoding: "utf8" });
+    const stdout = String(check.stdout || "").trim();
+    const stderr = String(check.stderr || "").trim();
+    const available = check.status === 0;
+    commandAvailabilityCache.set(normalized, { checkedAt: Date.now(), available, stdout, stderr });
+    return { available, stdout, stderr, exitCode: available ? 0 : 1 };
+  };
+
+  const probeTcpPort = (host: string, port: number, timeoutMs = 1800) =>
+    new Promise<{ success: boolean; stdout: string; stderr: string }>((resolve) => {
+      const socket = net.createConnection({ host, port });
+      let resolved = false;
+      const settle = (payload: { success: boolean; stdout: string; stderr: string }) => {
+        if (resolved) return;
+        resolved = true;
+        socket.destroy();
+        resolve(payload);
+      };
+      socket.setTimeout(timeoutMs);
+      socket.once("connect", () => settle({ success: true, stdout: `connected to ${host}:${port}`, stderr: "" }));
+      socket.once("timeout", () => settle({ success: false, stdout: "", stderr: `connect timeout (${timeoutMs}ms)` }));
+      socket.once("error", (error) => settle({ success: false, stdout: "", stderr: error.message }));
+    });
+
+  const keywordMatches = (text: string, keywords: string[]) => keywords.some((keyword) => text.includes(keyword));
+  const classifyFailureCategory = (
+    result: TestResult,
+    logs: string,
+    summary: string,
+    stepResults?: StepExecutionResult[],
+  ): FailureCategory => {
+    if (result === TEST_RESULT.PASSED) return FAILURE_CATEGORY.NONE;
+    const haystack = [logs, summary, ...(stepResults || []).map((step) => `${step.logs || ""}\n${step.output || ""}\n${step.stderr || ""}\n${step.conclusion || ""}`)]
+      .join("\n")
+      .toLowerCase();
+    const permissionKeywords = [
+      "permission denied",
+      "access denied",
+      "unauthorized",
+      "forbidden",
+      "authentication failed",
+      "auth failed",
+      "login failed",
+      "credential",
+      "权限",
+      "鉴权",
+      "未授权",
+      "拒绝访问",
+    ];
+    const environmentKeywords = [
+      "no route",
+      "host unreachable",
+      "timeout",
+      "timed out",
+      "connection refused",
+      "not found",
+      "command not found",
+      "dns",
+      "network is unreachable",
+      "address is empty",
+      "missing payload",
+      "invalid port",
+      "environment",
+      "连接失败",
+      "不可达",
+      "超时",
+      "前置",
+      "blocked",
+    ];
+    if (keywordMatches(haystack, permissionKeywords)) return FAILURE_CATEGORY.PERMISSION;
+    if (result === TEST_RESULT.BLOCKED || keywordMatches(haystack, environmentKeywords)) return FAILURE_CATEGORY.ENVIRONMENT;
+    return FAILURE_CATEGORY.SCRIPT;
+  };
+
+  const normalizeStepEvidence = (step: StepExecutionResult, evidence?: CommandEvidence): StepExecutionResult => {
+    const fallbackTimestamp = evidence?.finishedAt || new Date().toISOString();
+    const normalizedCommandResult = step.command_result ? normalizeStepResult(step.command_result) : undefined;
+    let derivedExitCode: number | null | undefined;
+    if (typeof step.exit_code === "number") {
+      derivedExitCode = step.exit_code;
+    } else if (normalizedCommandResult) {
+      if (normalizedCommandResult === "PASSED") derivedExitCode = 0;
+      else if (normalizedCommandResult === "FAILED" || normalizedCommandResult === "ERROR" || normalizedCommandResult === "BLOCKED") derivedExitCode = 1;
+    } else if (typeof evidence?.exitCode === "number") {
+      derivedExitCode = evidence.exitCode;
+    }
+    const stdout = step.stdout ?? step.output ?? evidence?.stdout ?? "";
+    const stderr = step.stderr ?? evidence?.stderr ?? "";
+    const conclusion = step.conclusion || step.security_assessment || step.logs || "";
+    return {
+      ...step,
+      result: normalizeStepResult(step.result),
+      command_result: normalizedCommandResult || step.command_result,
+      command: step.command || evidence?.command || step.command || "",
+      output: step.output || stdout || stderr ? step.output || stdout || stderr : "",
+      exit_code: derivedExitCode ?? null,
+      stdout,
+      stderr,
+      timestamp: step.timestamp || fallbackTimestamp,
+      conclusion,
+      security_assessment: step.security_assessment || conclusion,
+    };
+  };
+
+  const buildFallbackStepResult = (result: TestResult, logs: string, evidence?: CommandEvidence): StepExecutionResult => {
+    const commandResult = result === TEST_RESULT.PASSED
+      ? "PASSED"
+      : result === TEST_RESULT.BLOCKED
+        ? "BLOCKED"
+        : "FAILED";
+    return normalizeStepEvidence({
+      name: "执行结果",
+      result,
+      logs,
+      duration: 0,
+      command: evidence?.command || "",
+      command_result: commandResult,
+      output: [evidence?.stdout, evidence?.stderr].filter(Boolean).join("\n"),
+      conclusion: result === TEST_RESULT.PASSED ? "执行命令完成，结果通过。" : "执行命令未通过，请查看命令输出。",
+    }, evidence);
+  };
+
+  const enrichStepResultsWithEvidence = (
+    stepResults: StepExecutionResult[] | undefined,
+    result: TestResult,
+    logs: string,
+    evidence?: CommandEvidence,
+  ) => {
+    if (!stepResults || stepResults.length === 0) {
+      return [buildFallbackStepResult(result, logs, evidence)];
+    }
+    return stepResults.map((step) => normalizeStepEvidence(step, evidence));
+  };
+
+  type PreflightResult = {
+    ok: boolean;
+    duration: number;
+    logs: string;
+    summary: string;
+    stepResults: StepExecutionResult[];
+    failureCategory?: FailureCategory;
+  };
+
+  const runPreflightChecks = async (
+    task: ExecutionTaskRecord,
+    item: ExecutionTaskItemRecord,
+    adapter: ExecutorAdapter,
+  ): Promise<PreflightResult> => {
+    const startedAt = Date.now();
+    const steps: StepExecutionResult[] = [];
+    const runtimeInputs = resolveTaskRuntimeInputs(task, item);
+    const requiredInputs = parseJsonArray(item.required_inputs);
+    const signature = [item.title, item.test_tool, item.script_path, item.description].filter(Boolean).join(" ").toLowerCase();
+    const connectionAddress = String(runtimeInputs.connection_address || "").trim();
+    const needsConnectionAddress = requiredInputs.includes("connection_address") ||
+      requiredInputs.some((key) => key.endsWith("_port")) ||
+      signature.includes("adb") ||
+      signature.includes("ssh");
+    const nowTimestamp = () => new Date().toISOString();
+
+    const pushStep = (step: StepExecutionResult) => {
+      steps.push(normalizeStepEvidence({
+        ...step,
+        timestamp: step.timestamp || nowTimestamp(),
+      }));
+    };
+
+    if (needsConnectionAddress) {
+      if (!connectionAddress) {
+        pushStep({
+          name: "前置检查：连接地址",
+          result: "BLOCKED",
+          logs: "未配置连接地址。",
+          command: "validate connection_address",
+          command_result: "BLOCKED",
+          exit_code: 1,
+          stderr: "connection_address is empty",
+          conclusion: "任务缺少必要资产连接地址，无法执行。",
+        });
+        const duration = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+        return {
+          ok: false,
+          duration,
+          logs: "前置检查失败：未配置连接地址。",
+          summary: "前置检查失败：连接地址为空。",
+          stepResults: steps,
+          failureCategory: FAILURE_CATEGORY.ENVIRONMENT,
+        };
+      }
+      pushStep({
+        name: "前置检查：连接地址",
+        result: "PASSED",
+        logs: `连接地址 ${connectionAddress} 已就绪。`,
+        command: "validate connection_address",
+        command_result: "PASSED",
+        exit_code: 0,
+        stdout: connectionAddress,
+        conclusion: "已获取可用连接地址。",
+      });
+    }
+
+    const requiredCommands = new Set<string>();
+    if (adapter.name === "python") {
+      requiredCommands.add(PYTHON_EXECUTABLE);
+    }
+    if (requiredInputs.includes("adb_port") || signature.includes("adb")) {
+      requiredCommands.add("adb");
+    }
+    if (requiredInputs.includes("ssh_port") || signature.includes("ssh")) {
+      requiredCommands.add("ssh");
+    }
+
+    for (const command of requiredCommands) {
+      const started = Date.now();
+      const checked = checkCommandAvailability(command);
+      const duration = Math.max(1, Math.round((Date.now() - started) / 1000));
+      if (!checked.available) {
+        pushStep({
+          name: `前置检查：命令 ${command}`,
+          result: "BLOCKED",
+          logs: `命令 ${command} 不可用。`,
+          duration,
+          command: `command -v ${command}`,
+          command_result: "FAILED",
+          exit_code: checked.exitCode,
+          stdout: checked.stdout,
+          stderr: checked.stderr || `${command} not found`,
+          conclusion: `缺少 ${command}，任务无法启动。`,
+        });
+        return {
+          ok: false,
+          duration: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+          logs: `前置检查失败：命令 ${command} 不可用。`,
+          summary: `前置检查失败：未安装或未配置 ${command}。`,
+          stepResults: steps,
+          failureCategory: FAILURE_CATEGORY.ENVIRONMENT,
+        };
+      }
+      pushStep({
+        name: `前置检查：命令 ${command}`,
+        result: "PASSED",
+        logs: `命令 ${command} 可用。`,
+        duration,
+        command: `command -v ${command}`,
+        command_result: "PASSED",
+        exit_code: 0,
+        stdout: checked.stdout || command,
+        stderr: checked.stderr,
+        conclusion: `${command} 可执行。`,
+      });
+    }
+
+    const portChecks: Array<{ key: string; label: string; fallback: number }> = [];
+    if (requiredInputs.includes("adb_port") || signature.includes("adb")) {
+      portChecks.push({ key: "adb_port", label: "ADB", fallback: 5555 });
+    }
+    if (requiredInputs.includes("ssh_port") || signature.includes("ssh")) {
+      portChecks.push({ key: "ssh_port", label: "SSH", fallback: 22 });
+    }
+
+    for (const check of portChecks) {
+      const portRaw = String(runtimeInputs[check.key] || check.fallback);
+      const portValue = Number(portRaw);
+      if (!Number.isInteger(portValue) || portValue <= 0 || portValue > 65535) {
+        pushStep({
+          name: `前置检查：${check.label} 端口`,
+          result: "BLOCKED",
+          logs: `${check.label} 端口配置无效: ${portRaw}`,
+          command: `validate port ${check.key}`,
+          command_result: "BLOCKED",
+          exit_code: 1,
+          stderr: `invalid port: ${portRaw}`,
+          conclusion: "端口参数不合法，无法继续执行。",
+        });
+        return {
+          ok: false,
+          duration: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+          logs: `前置检查失败：${check.label} 端口配置无效。`,
+          summary: `前置检查失败：${check.label} 端口配置无效。`,
+          stepResults: steps,
+          failureCategory: FAILURE_CATEGORY.ENVIRONMENT,
+        };
+      }
+      const started = Date.now();
+      const tcp = await probeTcpPort(connectionAddress, portValue);
+      const duration = Math.max(1, Math.round((Date.now() - started) / 1000));
+      if (!tcp.success) {
+        pushStep({
+          name: `前置检查：${check.label} 端口连通性`,
+          result: "BLOCKED",
+          logs: `${check.label} 端口不可达：${tcp.stderr || "连接失败"}`,
+          duration,
+          command: `tcp_connect ${connectionAddress}:${portValue}`,
+          command_result: "BLOCKED",
+          exit_code: 1,
+          stdout: tcp.stdout,
+          stderr: tcp.stderr,
+          conclusion: `${check.label} 端口不可达，任务在前置检查阶段阻塞。`,
+        });
+        return {
+          ok: false,
+          duration: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+          logs: `前置检查失败：${check.label} 端口不可达。`,
+          summary: `前置检查失败：${connectionAddress}:${portValue} 不可达。`,
+          stepResults: steps,
+          failureCategory: FAILURE_CATEGORY.ENVIRONMENT,
+        };
+      }
+      pushStep({
+        name: `前置检查：${check.label} 端口连通性`,
+        result: "PASSED",
+        logs: `${check.label} 端口可达。`,
+        duration,
+        command: `tcp_connect ${connectionAddress}:${portValue}`,
+        command_result: "PASSED",
+        exit_code: 0,
+        stdout: tcp.stdout,
+        stderr: tcp.stderr,
+        conclusion: `${check.label} 前置连通性通过。`,
+      });
+    }
+
+    const duration = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    return {
+      ok: true,
+      duration,
+      logs: "前置检查通过。",
+      summary: "前置检查通过。",
+      stepResults: steps,
+    };
+  };
+
+  const refreshTaskFailureCategory = (taskId: number) => {
+    const items = db.prepare(`
+      SELECT
+        failure_category,
+        result
+      FROM execution_task_items
+      WHERE task_id = ?
+      ORDER BY sort_order DESC, id DESC
+    `).all(taskId) as Array<{ failure_category?: string | null; result?: string | null }>;
+    const activeFailure = items.find((item) =>
+      normalizeTestResult(item.result || "", TEST_RESULT.PASSED) !== TEST_RESULT.PASSED &&
+      normalizeFailureCategory(item.failure_category) !== FAILURE_CATEGORY.NONE
+    );
+    const nextFailureCategory = activeFailure
+      ? normalizeFailureCategory(activeFailure.failure_category)
+      : FAILURE_CATEGORY.NONE;
+    db.prepare("UPDATE execution_tasks SET failure_category = ? WHERE id = ?").run(nextFailureCategory, taskId);
+    return nextFailureCategory;
+  };
+
+  const getRetryDecision = (task: ExecutionTaskRecord) => {
+    if ([EXECUTION_STATUS.PENDING, EXECUTION_STATUS.RUNNING].includes(normalizeExecutionStatus(task.status))) {
+      return { canRetry: false, reason: "任务仍在执行中，暂不可重试。" };
+    }
+    if (Number(task.retry_count || 0) >= MAX_TASK_RETRIES) {
+      return { canRetry: false, reason: `重试次数已达到上限（${MAX_TASK_RETRIES}）。` };
+    }
+    if (Number(task.failed_items || 0) === 0 && Number(task.blocked_items || 0) === 0 && Number(task.passed_items || 0) > 0) {
+      return { canRetry: false, reason: "任务已通过，无需重试。" };
+    }
+    const category = normalizeFailureCategory(task.failure_category);
+    if (category === FAILURE_CATEGORY.PERMISSION) {
+      return { canRetry: false, reason: "权限类失败需先修复策略或凭据，不支持自动重试。" };
+    }
+    if (category === FAILURE_CATEGORY.NONE && Number(task.failed_items || 0) === 0 && Number(task.blocked_items || 0) === 0) {
+      return { canRetry: false, reason: "任务没有可重试的失败项。" };
+    }
+    return { canRetry: true, reason: null as string | null };
+  };
+
+  const decorateTaskRetryMeta = <T extends ExecutionTaskRecord>(task: T): T => {
+    const decision = getRetryDecision(task);
+    return {
+      ...task,
+      failure_category: normalizeFailureCategory(task.failure_category),
+      can_retry: decision.canRetry,
+      retry_block_reason: decision.reason,
+    };
+  };
+
   const listTestSuites = () => db.prepare(`
     SELECT
       ts.id,
@@ -676,10 +1467,10 @@ async function startServer() {
     LEFT JOIN test_cases current_tc ON current_tc.id = et.current_test_case_id
     LEFT JOIN assets a ON a.id = et.asset_id
     ORDER BY
-      CASE WHEN et.status IN ('Running', 'Queued') THEN 0 ELSE 1 END,
+      CASE WHEN et.status IN ('RUNNING', 'PENDING') THEN 0 ELSE 1 END,
       et.started_at DESC
     LIMIT 50
-  `).all();
+  `).all().map((task: ExecutionTaskRecord) => decorateTaskRetryMeta(task));
 
   const getExecutionTaskDetail = (taskId: number) => {
     const task = db.prepare(`
@@ -723,7 +1514,7 @@ async function startServer() {
       ORDER BY eti.sort_order ASC, eti.id ASC
     `).all(taskId);
 
-    return { task, items };
+    return { task: decorateTaskRetryMeta(task as ExecutionTaskRecord), items };
   };
 
   const listSuiteRuns = () => db.prepare(`
@@ -746,10 +1537,41 @@ async function startServer() {
     LEFT JOIN test_cases current_tc ON current_tc.id = et.current_test_case_id
     WHERE et.type = 'suite'
     ORDER BY
-      CASE WHEN et.status IN ('Running', 'Queued') THEN 0 ELSE 1 END,
+      CASE WHEN et.status IN ('RUNNING', 'PENDING') THEN 0 ELSE 1 END,
       et.started_at DESC
     LIMIT 20
   `).all();
+
+  const ensureSecurityBaselineSuite = () => {
+    const placeholders = SECURITY_BASELINE_CASE_TITLES.map(() => "?").join(",");
+    const cases = db.prepare(`
+      SELECT id, title
+      FROM test_cases
+      WHERE title IN (${placeholders})
+    `).all(...SECURITY_BASELINE_CASE_TITLES) as Array<{ id: number; title: string }>;
+    if (cases.length === 0) return null;
+
+    const byTitle = new Map(cases.map((item) => [item.title, item.id]));
+    const orderedCaseIds = SECURITY_BASELINE_CASE_TITLES
+      .map((title) => byTitle.get(title))
+      .filter((id): id is number => Number.isFinite(id));
+
+    if (orderedCaseIds.length === 0) return null;
+
+    const existingSuite = db.prepare("SELECT id FROM test_suites WHERE name = ?").get(SECURITY_BASELINE_SUITE_NAME) as { id: number } | undefined;
+    const description = `系统安全基线（自动维护）：覆盖 SSH/ADB/Telnet/FTP 访问控制、日志与配置加固、OTA 升级安全、数据保护及账户策略检查（当前 ${orderedCaseIds.length} 条）。`;
+    const suiteId = db.transaction(() => {
+      const resolvedSuiteId = existingSuite
+        ? existingSuite.id
+        : Number(db.prepare("INSERT INTO test_suites (name, description) VALUES (?, ?)").run(SECURITY_BASELINE_SUITE_NAME, description).lastInsertRowid);
+      db.prepare("UPDATE test_suites SET description = ? WHERE id = ?").run(description, resolvedSuiteId);
+      db.prepare("DELETE FROM test_suite_cases WHERE suite_id = ?").run(resolvedSuiteId);
+      const insertCase = db.prepare("INSERT INTO test_suite_cases (suite_id, test_case_id, sort_order) VALUES (?, ?, ?)");
+      orderedCaseIds.forEach((testCaseId, index) => insertCase.run(resolvedSuiteId, testCaseId, index + 1));
+      return resolvedSuiteId;
+    })();
+    return suiteId;
+  };
 
   const createExecutionTask = ({
     type,
@@ -761,6 +1583,7 @@ async function startServer() {
     stopOnFailure,
     sourceTaskId,
     retryCount,
+    runtimeInputs,
   }: {
     type: "single" | "suite";
     assetId?: number | null;
@@ -771,11 +1594,12 @@ async function startServer() {
     stopOnFailure?: boolean;
     sourceTaskId?: number | null;
     retryCount?: number;
+    runtimeInputs?: Record<string, string>;
   }) => {
     const transaction = db.transaction(() => {
       const info = db.prepare(`
-        INSERT INTO execution_tasks (type, status, asset_id, suite_id, test_case_id, total_items, current_test_case_id, initiated_by, stop_on_failure, executor, source_task_id, retry_count)
-        VALUES (?, 'Queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO execution_tasks (type, status, asset_id, suite_id, test_case_id, total_items, current_test_case_id, initiated_by, stop_on_failure, executor, runtime_inputs, source_task_id, retry_count)
+        VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         type,
         assetId || null,
@@ -786,6 +1610,7 @@ async function startServer() {
         initiatedBy || "System",
         stopOnFailure ? 1 : 0,
         EXECUTION_MODE,
+        JSON.stringify(runtimeInputs || {}),
         sourceTaskId || null,
         retryCount || 0
       );
@@ -806,7 +1631,7 @@ async function startServer() {
   const cloneExecutionTask = (taskId: number) => {
     const task = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
     if (!task) return null;
-    if (["Queued", "Running"].includes(task.status)) return { error: "Task is still active" } as const;
+    if ([EXECUTION_STATUS.PENDING, EXECUTION_STATUS.RUNNING].includes(task.status)) return { error: "Task is still active" } as const;
 
     const items = db.prepare(`
       SELECT test_case_id
@@ -824,6 +1649,13 @@ async function startServer() {
       testCaseIds: items.map(item => item.test_case_id),
       initiatedBy: "User",
       stopOnFailure: Boolean(task.stop_on_failure),
+      runtimeInputs: (() => {
+        try {
+          return task.runtime_inputs ? JSON.parse(task.runtime_inputs) : {};
+        } catch {
+          return {};
+        }
+      })(),
       sourceTaskId: task.id,
       retryCount: Number(task.retry_count || 0) + 1,
     });
@@ -831,7 +1663,7 @@ async function startServer() {
   };
 
   const simulateExecutor: TaskExecutor = async (task, item, broadcastEvent) => {
-    const results: Array<"Passed" | "Failed" | "Blocked"> = ["Passed", "Failed", "Blocked"];
+    const results: TestResult[] = [TEST_RESULT.PASSED, TEST_RESULT.FAILED, TEST_RESULT.BLOCKED];
     const protocol = item.protocol || "CAN";
     const duration = Math.floor(Math.random() * 240) + 60;
 
@@ -882,6 +1714,8 @@ async function startServer() {
   };
 
   const parseExecutorOutput = (result: ExecutorResult) => {
+    const fallbackEvidence = result.evidence;
+    const fallbackDuration = Number(result.duration || 0);
     try {
       const lines = result.logs.split("\n").filter(Boolean);
       const lastJsonLine = [...lines].reverse().find((line) => {
@@ -889,18 +1723,39 @@ async function startServer() {
         return normalized.startsWith("{") && normalized.endsWith("}");
       });
       if (!lastJsonLine) {
-        return result;
+        return {
+          ...result,
+          stepResults: enrichStepResultsWithEvidence(result.stepResults, result.result, result.logs, fallbackEvidence),
+          failureCategory: result.failureCategory || classifyFailureCategory(result.result, result.logs, result.summary || "", result.stepResults),
+        };
       }
       const parsed = JSON.parse(lastJsonLine.replace(/^\[(stdout|stderr)\]\s*/i, "").trim());
+      const normalizedResult = normalizeTestResult(parsed.result, result.result);
+      const normalizedLogs = parsed.logs || result.logs;
+      const normalizedSummary = parsed.summary || parsed.logs || result.summary || "";
+      const parsedSteps = Array.isArray(parsed.steps)
+        ? parsed.steps.map((step: any) => ({
+            ...step,
+            result: normalizeStepResult(step?.result),
+            command_result: step?.command_result ? normalizeStepResult(step.command_result) : undefined,
+          } as StepExecutionResult))
+        : result.stepResults;
+      const normalizedStepResults = enrichStepResultsWithEvidence(parsedSteps, normalizedResult, normalizedLogs, fallbackEvidence);
       return {
-        result: parsed.result || result.result,
-        duration: Number(parsed.duration || result.duration),
-        logs: parsed.logs || result.logs,
-        summary: parsed.summary || parsed.logs || result.summary,
-        stepResults: Array.isArray(parsed.steps) ? parsed.steps : result.stepResults,
+        ...result,
+        result: normalizedResult,
+        duration: Number(parsed.duration || fallbackDuration),
+        logs: normalizedLogs,
+        summary: normalizedSummary,
+        stepResults: normalizedStepResults,
+        failureCategory: result.failureCategory || classifyFailureCategory(normalizedResult, normalizedLogs, normalizedSummary, normalizedStepResults),
       } as ExecutorResult;
     } catch {
-      return result;
+      return {
+        ...result,
+        stepResults: enrichStepResultsWithEvidence(result.stepResults, result.result, result.logs, fallbackEvidence),
+        failureCategory: result.failureCategory || classifyFailureCategory(result.result, result.logs, result.summary || "", result.stepResults),
+      };
     }
   };
 
@@ -914,7 +1769,7 @@ async function startServer() {
     new Promise<ExecutorResult>((resolve) => {
       if (!command) {
         resolve({
-          result: "Blocked",
+          result: TEST_RESULT.ERROR,
           duration: 0,
           logs: "EXECUTION_SCRIPT is not configured",
         });
@@ -922,7 +1777,10 @@ async function startServer() {
       }
 
       const startedAt = Date.now();
+      const startedAtIso = new Date(startedAt).toISOString();
       const output: string[] = [];
+      const stdoutOutput: string[] = [];
+      const stderrOutput: string[] = [];
       const child = spawn(command, { shell: true, cwd: process.cwd(), env: process.env });
       registerChild(child);
 
@@ -930,6 +1788,8 @@ async function startServer() {
         const text = chunk.toString().trim();
         if (!text) return;
         output.push(`[${stream}] ${text}`);
+        if (stream === "stdout") stdoutOutput.push(text);
+        if (stream === "stderr") stderrOutput.push(text);
         text.split("\n").forEach(line => {
           broadcastEvent({
             type: "SIMULATION_LOG",
@@ -945,19 +1805,35 @@ async function startServer() {
       child.stderr.on("data", (chunk) => handleChunk(chunk, "stderr"));
       child.on("close", (code, signal) => {
         registerChild(null);
-        const duration = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+        const finishedAt = Date.now();
+        const duration = Math.max(1, Math.round((finishedAt - startedAt) / 1000));
+        const evidence: CommandEvidence = {
+          command,
+          exitCode: typeof code === "number" ? code : null,
+          stdout: stdoutOutput.join("\n"),
+          stderr: stderrOutput.join("\n"),
+          startedAt: startedAtIso,
+          finishedAt: new Date(finishedAt).toISOString(),
+          signal,
+        };
         if (signal === "SIGTERM") {
           resolve({
-            result: "Blocked",
+            result: TEST_RESULT.BLOCKED,
             duration,
             logs: output.join("\n") || "Execution cancelled",
+            summary: "执行被中断（SIGTERM）。",
+            evidence,
+            failureCategory: FAILURE_CATEGORY.ENVIRONMENT,
+            stepResults: enrichStepResultsWithEvidence(undefined, TEST_RESULT.BLOCKED, output.join("\n") || "Execution cancelled", evidence),
           });
           return;
         }
         resolve(parseExecutorOutput({
-          result: code === 0 ? "Passed" : "Failed",
+          result: code === 0 ? TEST_RESULT.PASSED : TEST_RESULT.FAILED,
           duration,
           logs: output.join("\n") || `Script exited with code ${code ?? -1}`,
+          summary: code === 0 ? "命令执行完成。" : `命令退出码 ${code ?? -1}。`,
+          evidence,
         }));
       });
     });
@@ -969,11 +1845,20 @@ async function startServer() {
   };
 
   const pythonExecutor: TaskExecutor = (task, item, broadcastEvent, registerChild) => {
-    const tempDir = mkdtempSync(path.join(os.tmpdir(), "iov-core-task-"));
-    const payloadPath = path.join(tempDir, "payload.json");
+    const payloadDir = createTaskArtifactDir(task.id, item.id, "payloads");
+    const payloadPath = path.join(payloadDir, "payload.json");
+    const artifactDirs = {
+      root: ARTIFACT_ROOT,
+      payload_dir: payloadDir,
+      adb_push_dir: createTaskArtifactDir(task.id, item.id, "adb-push"),
+      adb_pull_dir: createTaskArtifactDir(task.id, item.id, "adb-pull"),
+      logs_dir: createTaskArtifactDir(task.id, item.id, "logs"),
+    };
+    const runtimeInputs = resolveTaskRuntimeInputs(task, item);
     const payload = {
       task,
       item,
+      runtimeInputs,
       testCase: {
         id: item.test_case_id,
         title: item.title,
@@ -983,7 +1868,9 @@ async function startServer() {
         test_input: item.test_input,
         test_tool: item.test_tool,
         expected_result: item.expected_result,
+        required_inputs: item.required_inputs,
       },
+      artifact_dirs: artifactDirs,
     };
     writeFileSync(payloadPath, JSON.stringify(payload, null, 2), "utf8");
 
@@ -998,9 +1885,7 @@ async function startServer() {
           pythonScript,
           renderExecutorTemplate(item.args_template || "{{payloadPath}}", task, item, { payloadPath }),
         ].filter(Boolean).join(" ").trim();
-    return spawnCommandExecutor(command, task, item, broadcastEvent, registerChild).finally(() => {
-      rmSync(tempDir, { recursive: true, force: true });
-    });
+    return spawnCommandExecutor(command, task, item, broadcastEvent, registerChild);
   };
 
   const adapterRegistry: ExecutorAdapter[] = [
@@ -1042,21 +1927,18 @@ async function startServer() {
   const runTaskItem = async (
     task: ExecutionTaskRecord,
     item: ExecutionTaskItemRecord,
+    adapter: ExecutorAdapter,
     registerChild: (child: ChildProcessWithoutNullStreams | null) => void,
-  ) => {
-    const adapter = resolveExecutorAdapter(task, item);
-    db.prepare("UPDATE execution_tasks SET executor = ? WHERE id = ?").run(adapter.name, task.id);
-    return adapter.run(task, item, broadcast, registerChild);
-  };
+  ) => adapter.run(task, item, broadcast, registerChild);
 
   const updateTaskCounters = (taskId: number) => {
     const stats = db.prepare(`
       SELECT
         COUNT(*) as total,
-        SUM(CASE WHEN status = 'Completed' THEN 1 ELSE 0 END) as completed,
-        SUM(CASE WHEN result = 'Passed' THEN 1 ELSE 0 END) as passed,
-        SUM(CASE WHEN result = 'Failed' THEN 1 ELSE 0 END) as failed,
-        SUM(CASE WHEN result = 'Blocked' THEN 1 ELSE 0 END) as blocked
+        SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN result = 'PASSED' THEN 1 ELSE 0 END) as passed,
+        SUM(CASE WHEN result IN ('FAILED', 'ERROR') THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN result = 'BLOCKED' THEN 1 ELSE 0 END) as blocked
       FROM execution_task_items
       WHERE task_id = ?
     `).get(taskId) as Record<string, number>;
@@ -1101,6 +1983,8 @@ async function startServer() {
         tc.command_template,
         tc.args_template,
         tc.timeout_sec,
+        tc.required_inputs,
+        tc.default_runtime_inputs,
         a.name as asset_name,
         a.connection_address
       FROM execution_task_items eti
@@ -1112,24 +1996,27 @@ async function startServer() {
     `).all(taskId) as ExecutionTaskItemRecord[];
 
     if (items.length === 0) {
-      db.prepare("UPDATE execution_tasks SET status = 'Completed', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(taskId);
+      db.prepare("UPDATE execution_tasks SET status = 'COMPLETED', finished_at = CURRENT_TIMESTAMP, failure_category = 'NONE' WHERE id = ?").run(taskId);
       return;
     }
 
-    const completeTask = (status: "Completed" | "Failed" | "Cancelled" = "Completed", errorMessage?: string | null) => {
+    const completeTask = (status: ExecutionStatus = EXECUTION_STATUS.COMPLETED, errorMessage?: string | null) => {
       updateTaskCounters(taskId);
+      const finalFailureCategory = refreshTaskFailureCategory(taskId);
       db.prepare(`
         UPDATE execution_tasks
         SET status = ?,
             current_test_case_id = NULL,
             current_item_label = NULL,
             finished_at = CURRENT_TIMESTAMP,
-            error_message = ?
+            error_message = ?,
+            failure_category = ?
         WHERE id = ?
-      `).run(status, errorMessage || null, taskId);
+      `).run(status, errorMessage || null, finalFailureCategory, taskId);
 
-      const completedTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId);
-      broadcast({ type: "EXECUTION_TASK_COMPLETED", task: completedTask });
+      const completedTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord;
+      broadcast({ type: "EXECUTION_TASK_COMPLETED", task: decorateTaskRetryMeta(completedTask) });
+      scheduleTaskArtifactCleanup(completedTask);
       activeTaskRuns.delete(taskId);
       activeTaskChildren.delete(taskId);
     };
@@ -1149,20 +2036,20 @@ async function startServer() {
       for (let index = 0; index < items.length; index += 1) {
         const item = items[index];
         const latestTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
-        if (!latestTask || ["Cancelled", "Failed"].includes(latestTask.status)) {
+        if (!latestTask || latestTask.status === EXECUTION_STATUS.CANCELLED) {
           break;
         }
 
         db.prepare("UPDATE test_cases SET status = 'Running' WHERE id = ?").run(item.test_case_id);
         db.prepare(`
           UPDATE execution_task_items
-          SET status = 'Running',
+          SET status = 'RUNNING',
               started_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(item.id);
         db.prepare(`
           UPDATE execution_tasks
-          SET status = 'Running',
+          SET status = 'RUNNING',
               current_test_case_id = ?,
               current_item_label = ?
           WHERE id = ?
@@ -1170,19 +2057,62 @@ async function startServer() {
 
         broadcast({
           type: "EXECUTION_TASK_UPDATED",
-          task: db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId),
+          task: decorateTaskRetryMeta(db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord),
         });
         const refreshedTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord;
-        const { result, duration, logs, summary, stepResults } = await runTaskItem(refreshedTask, item, (child) => {
-          if (child) {
-            activeTaskChildren.set(taskId, child);
+        const adapter = resolveExecutorAdapter(refreshedTask, item);
+        db.prepare("UPDATE execution_tasks SET executor = ? WHERE id = ?").run(adapter.name, taskId);
+        let result: TestResult = TEST_RESULT.ERROR;
+        let duration = 0;
+        let logs = "";
+        let summary = "";
+        let stepResults: StepExecutionResult[] | undefined;
+        let failureCategory: FailureCategory = FAILURE_CATEGORY.NONE;
+        try {
+          const preflight = await runPreflightChecks(refreshedTask, item, adapter);
+          if (!preflight.ok) {
+            result = TEST_RESULT.BLOCKED;
+            duration = preflight.duration;
+            logs = preflight.logs;
+            summary = preflight.summary;
+            stepResults = preflight.stepResults;
+            failureCategory = preflight.failureCategory || FAILURE_CATEGORY.ENVIRONMENT;
           } else {
-            activeTaskChildren.delete(taskId);
+            const execution = await runTaskItem(refreshedTask, item, adapter, (child) => {
+              if (child) {
+                activeTaskChildren.set(taskId, child);
+              } else {
+                activeTaskChildren.delete(taskId);
+              }
+            });
+            result = normalizeTestResult(execution.result);
+            duration = execution.duration;
+            logs = execution.logs;
+            summary = execution.summary || "";
+            stepResults = execution.stepResults;
+            failureCategory = execution.failureCategory || classifyFailureCategory(result, logs, summary, stepResults);
           }
-        });
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : "Execution error";
+          result = TEST_RESULT.ERROR;
+          duration = 0;
+          logs = errorMessage;
+          summary = `执行器异常: ${errorMessage}`;
+          stepResults = enrichStepResultsWithEvidence(
+            [{ name: "执行器异常", result: "ERROR", logs: errorMessage, duration: 0, conclusion: "执行器异常导致任务失败。" }],
+            TEST_RESULT.ERROR,
+            errorMessage
+          );
+          failureCategory = FAILURE_CATEGORY.SCRIPT;
+        }
+
+        stepResults = enrichStepResultsWithEvidence(stepResults, result, logs);
+        if (result === TEST_RESULT.PASSED) {
+          failureCategory = FAILURE_CATEGORY.NONE;
+        }
 
         const currentTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
-        if (!currentTask || currentTask.status === "Cancelled") {
+        if (!currentTask || currentTask.status === EXECUTION_STATUS.CANCELLED) {
           break;
         }
 
@@ -1202,25 +2132,27 @@ async function startServer() {
         db.prepare("UPDATE test_cases SET status = ? WHERE id = ?").run(result, item.test_case_id);
         db.prepare(`
           UPDATE execution_task_items
-          SET status = 'Completed',
+          SET status = 'COMPLETED',
               result = ?,
+              failure_category = ?,
               run_id = ?,
               finished_at = CURRENT_TIMESTAMP
           WHERE id = ?
-        `).run(result, Number(runInfo.lastInsertRowid), item.id);
+        `).run(result, failureCategory, Number(runInfo.lastInsertRowid), item.id);
 
         updateTaskCounters(taskId);
+        refreshTaskFailureCategory(taskId);
 
         const isLast = index === items.length - 1;
-        const stopOnFailureTriggered = Boolean(currentTask.stop_on_failure) && result === "Failed";
+        const stopOnFailureTriggered = Boolean(currentTask.stop_on_failure) && [TEST_RESULT.FAILED, TEST_RESULT.ERROR].includes(result);
         if (stopOnFailureTriggered) {
           db.prepare(`
             UPDATE execution_task_items
-            SET status = 'Cancelled',
+            SET status = 'CANCELLED',
                 finished_at = CURRENT_TIMESTAMP
             WHERE task_id = ? AND sort_order > ?
           `).run(taskId, item.sort_order);
-          completeTask("Failed", `Task stopped after failure on ${item.title}`);
+          completeTask(EXECUTION_STATUS.COMPLETED, `Task stopped after failure on ${item.title}`);
           cancelPendingTimers();
           break;
         } else if (isLast) {
@@ -1236,7 +2168,7 @@ async function startServer() {
 
           broadcast({
             type: "EXECUTION_TASK_UPDATED",
-            task: db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId),
+            task: decorateTaskRetryMeta(db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord),
           });
         }
 
@@ -1253,50 +2185,60 @@ async function startServer() {
     activeTaskRuns.set(taskId, []);
     runner.catch((error) => {
       console.error("Execution task failed:", error);
-      completeTask("Failed", error instanceof Error ? error.message : "Task failed");
+      completeTask(EXECUTION_STATUS.COMPLETED, error instanceof Error ? error.message : "Task failed");
     });
   };
 
   const cancelExecutionTask = (taskId: number) => {
     const task = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
-    if (!task || !["Queued", "Running"].includes(task.status)) {
+    if (!task || ![EXECUTION_STATUS.PENDING, EXECUTION_STATUS.RUNNING].includes(task.status)) {
       return false;
     }
 
     const timers = activeTaskRuns.get(taskId) || [];
     timers.forEach(timer => clearTimeout(timer));
     activeTaskRuns.delete(taskId);
+    const activeChild = activeTaskChildren.get(taskId);
+    if (activeChild) {
+      activeChild.kill("SIGTERM");
+      activeTaskChildren.delete(taskId);
+    }
 
     db.prepare(`
       UPDATE execution_task_items
-      SET status = CASE WHEN status = 'Completed' THEN status ELSE 'Cancelled' END,
-          finished_at = CASE WHEN status = 'Completed' THEN finished_at ELSE CURRENT_TIMESTAMP END
+      SET status = CASE WHEN status = 'COMPLETED' THEN status ELSE 'CANCELLED' END,
+          failure_category = CASE WHEN status = 'COMPLETED' THEN failure_category ELSE 'ENVIRONMENT' END,
+          finished_at = CASE WHEN status = 'COMPLETED' THEN finished_at ELSE CURRENT_TIMESTAMP END
       WHERE task_id = ?
     `).run(taskId);
+    updateTaskCounters(taskId);
 
     db.prepare(`
       UPDATE execution_tasks
-      SET status = 'Cancelled',
+      SET status = 'CANCELLED',
           current_test_case_id = NULL,
           current_item_label = NULL,
           finished_at = CURRENT_TIMESTAMP,
-          error_message = 'Cancelled by user'
+          error_message = 'Cancelled by user',
+          failure_category = 'ENVIRONMENT'
       WHERE id = ?
     `).run(taskId);
 
     const runningItems = db.prepare(`
       SELECT test_case_id
       FROM execution_task_items
-      WHERE task_id = ? AND status = 'Running'
+      WHERE task_id = ? AND status = 'RUNNING'
     `).all(taskId) as Array<{ test_case_id: number }>;
     runningItems.forEach(item => {
       db.prepare("UPDATE test_cases SET status = 'Draft' WHERE id = ?").run(item.test_case_id);
     });
 
+    const cancelledTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord;
     broadcast({
       type: "EXECUTION_TASK_COMPLETED",
-      task: db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId),
+      task: decorateTaskRetryMeta(cancelledTask),
     });
+    scheduleTaskArtifactCleanup(cancelledTask);
 
     return true;
   };
@@ -1311,7 +2253,7 @@ async function startServer() {
     `).all(suiteId) as Array<Record<string, any>>;
 
     if (suiteCases.length === 0) {
-      db.prepare("UPDATE suite_runs SET status = 'Completed', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(suiteRunId);
+      db.prepare("UPDATE suite_runs SET status = 'COMPLETED', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(suiteRunId);
       return;
     }
 
@@ -1322,7 +2264,7 @@ async function startServer() {
       const startDelay = index * 1800;
       const startTimer = setTimeout(() => {
         db.prepare("UPDATE test_cases SET status = 'Running' WHERE id = ?").run(testCase.id);
-        db.prepare("UPDATE suite_runs SET status = 'Running', current_case_id = ? WHERE id = ?").run(testCase.id, suiteRunId);
+        db.prepare("UPDATE suite_runs SET status = 'RUNNING', current_case_id = ? WHERE id = ?").run(testCase.id, suiteRunId);
         broadcast({
           type: "SUITE_CASE_STARTED",
           suiteRunId,
@@ -1334,7 +2276,7 @@ async function startServer() {
       timers.push(startTimer);
 
       const finishTimer = setTimeout(() => {
-        const results = ["Passed", "Failed", "Blocked"];
+        const results: TestResult[] = [TEST_RESULT.PASSED, TEST_RESULT.FAILED, TEST_RESULT.BLOCKED];
         const result = results[Math.floor(Math.random() * results.length)];
         const duration = Math.floor(Math.random() * 240) + 60;
         const logs = `Suite run ${suiteRunId}: ${testCase.title} finished with ${result}`;
@@ -1364,7 +2306,7 @@ async function startServer() {
           progress.failedCases,
           progress.blockedCases,
           nextCaseId,
-          isLast ? "Completed" : "Running",
+          isLast ? "COMPLETED" : "RUNNING",
           isLast ? 1 : 0,
           suiteRunId
         );
@@ -1387,7 +2329,7 @@ async function startServer() {
             type: "SUITE_RUN_COMPLETED",
             suiteRunId,
             suiteId,
-            status: "Completed",
+            status: "COMPLETED",
             progress: {
               ...progress,
               totalCases: suiteCases.length,
@@ -1503,7 +2445,7 @@ async function startServer() {
       const existingRun = db.prepare(`
         SELECT id
         FROM execution_tasks
-        WHERE suite_id = ? AND status IN ('Queued', 'Running')
+        WHERE suite_id = ? AND status IN ('PENDING', 'RUNNING')
         ORDER BY started_at DESC
         LIMIT 1
       `).get(suite_id);
@@ -1527,32 +2469,41 @@ async function startServer() {
   });
 
   app.post("/api/test-runs", (req, res) => {
-    const { test_case_id, asset_id, stop_on_failure } = req.body;
-    const testCaseId = Number(test_case_id);
-    const testCase = db.prepare("SELECT id FROM test_cases WHERE id = ?").get(testCaseId);
-    if (!testCase) {
-      return res.status(404).json({ error: "Test case not found" });
+    const { test_case_id, test_case_ids, asset_id, stop_on_failure, runtime_inputs } = req.body;
+    const testCaseIds = Array.isArray(test_case_ids)
+      ? test_case_ids.map((id: unknown) => Number(id)).filter((id: number) => Number.isFinite(id) && id > 0)
+      : Number.isFinite(Number(test_case_id))
+        ? [Number(test_case_id)]
+        : [];
+    if (testCaseIds.length === 0) {
+      return res.status(400).json({ error: "At least one test case is required" });
     }
+    const existingCases = db.prepare(`SELECT id FROM test_cases WHERE id IN (${testCaseIds.map(() => "?").join(",")})`).all(...testCaseIds) as Array<{ id: number }>;
+    if (existingCases.length !== testCaseIds.length) {
+      return res.status(404).json({ error: "One or more test cases were not found" });
+    }
+    const primaryTestCaseId = testCaseIds[0];
 
     const taskId = createExecutionTask({
-      type: "single",
+      type: testCaseIds.length > 1 ? "suite" : "single",
       assetId: asset_id ? Number(asset_id) : null,
-      testCaseId,
-      testCaseIds: [testCaseId],
+      testCaseId: primaryTestCaseId,
+      testCaseIds,
       initiatedBy: "User",
       stopOnFailure: Boolean(stop_on_failure),
+      runtimeInputs: runtime_inputs && typeof runtime_inputs === "object" ? runtime_inputs : {},
     });
     scheduleExecutionTask(taskId);
     res.json({ id: taskId, success: true });
   });
 
   app.post("/api/test-cases", (req, res) => {
-    const { title, category, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec } = req.body;
+    const { title, category, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec, required_inputs, default_runtime_inputs } = req.body;
     const info = db.prepare(
       `INSERT INTO test_cases (
         title, category, type, protocol, description, steps, test_input, test_tool,
-        expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec, required_inputs, default_runtime_inputs
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       title,
       category,
@@ -1568,7 +2519,9 @@ async function startServer() {
       script_path || "",
       command_template || "",
       args_template || "",
-      Number(timeout_sec || 300)
+      Number(timeout_sec || 300),
+      JSON.stringify(Array.isArray(required_inputs) ? required_inputs : []),
+      JSON.stringify(default_runtime_inputs && typeof default_runtime_inputs === "object" ? default_runtime_inputs : {})
     );
     res.json({ id: info.lastInsertRowid });
   });
@@ -1576,8 +2529,8 @@ async function startServer() {
   app.post("/api/test-cases/import", (req, res) => {
     const { cases } = req.body;
     const insert = db.prepare(`
-      INSERT INTO test_cases (category, title, test_input, test_tool, steps, expected_result, automation_level, type, protocol, description, executor_type, script_path, command_template, args_template, timeout_sec)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO test_cases (category, title, test_input, test_tool, steps, expected_result, automation_level, type, protocol, description, executor_type, script_path, command_template, args_template, timeout_sec, required_inputs, default_runtime_inputs)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const transaction = db.transaction((items) => {
@@ -1613,7 +2566,9 @@ async function startServer() {
           item.script_path || "",
           item.command_template || "",
           item.args_template || "",
-          Number(item.timeout_sec || 300)
+          Number(item.timeout_sec || 300),
+          JSON.stringify(Array.isArray(item.required_inputs) ? item.required_inputs : []),
+          JSON.stringify(item.default_runtime_inputs && typeof item.default_runtime_inputs === "object" ? item.default_runtime_inputs : {})
         );
       }
     });
@@ -1624,11 +2579,11 @@ async function startServer() {
 
   app.patch("/api/test-cases/:id", (req, res) => {
     const { id } = req.params;
-    const { title, category, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec } = req.body;
+    const { title, category, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec, required_inputs, default_runtime_inputs } = req.body;
     db.prepare(
       `UPDATE test_cases
        SET title = ?, category = ?, type = ?, protocol = ?, description = ?, steps = ?, test_input = ?, test_tool = ?, expected_result = ?, automation_level = ?,
-           executor_type = ?, script_path = ?, command_template = ?, args_template = ?, timeout_sec = ?
+           executor_type = ?, script_path = ?, command_template = ?, args_template = ?, timeout_sec = ?, required_inputs = ?, default_runtime_inputs = ?
        WHERE id = ?`
     ).run(
       title,
@@ -1646,6 +2601,8 @@ async function startServer() {
       command_template || "",
       args_template || "",
       Number(timeout_sec || 300),
+      JSON.stringify(Array.isArray(required_inputs) ? required_inputs : []),
+      JSON.stringify(default_runtime_inputs && typeof default_runtime_inputs === "object" ? default_runtime_inputs : {}),
       id
     );
     res.json({ success: true });
@@ -1653,6 +2610,7 @@ async function startServer() {
 
   app.delete("/api/test-cases/:id", (req, res) => {
     const { id } = req.params;
+    db.prepare("DELETE FROM test_suite_cases WHERE test_case_id = ?").run(id);
     db.prepare("DELETE FROM execution_task_items WHERE test_case_id = ?").run(id);
     db.prepare("DELETE FROM execution_tasks WHERE test_case_id = ? OR current_test_case_id = ?").run(id, id);
     db.prepare("DELETE FROM test_runs WHERE test_case_id = ?").run(id);
@@ -1666,9 +2624,10 @@ async function startServer() {
     db.prepare("UPDATE test_cases SET status = ? WHERE id = ?").run(status, id);
     
     // If it's a final state, record a test run to update stats
-    if (['Passed', 'Failed', 'Blocked'].includes(status)) {
+    const normalizedResult = normalizeTestResult(status, TEST_RESULT.ERROR);
+    if ([TEST_RESULT.PASSED, TEST_RESULT.FAILED, TEST_RESULT.BLOCKED, TEST_RESULT.ERROR].includes(normalizedResult)) {
       db.prepare("INSERT INTO test_runs (test_case_id, result, executed_by) VALUES (?, ?, ?)")
-        .run(id, status, 'System');
+        .run(id, normalizedResult, 'System');
     }
     
     res.json({ success: true });
@@ -1690,7 +2649,7 @@ async function startServer() {
       SELECT 
         date(executed_at) as date,
         COUNT(*) as total,
-        SUM(CASE WHEN result = 'Passed' THEN 1 ELSE 0 END) as passed
+        SUM(CASE WHEN result = 'PASSED' THEN 1 ELSE 0 END) as passed
       FROM test_runs
       WHERE executed_at >= date('now', '-7 days')
       GROUP BY date(executed_at)
@@ -1714,7 +2673,7 @@ async function startServer() {
       SELECT 
         category as name,
         COUNT(*) as total,
-        SUM(CASE WHEN status = 'Passed' THEN 1 ELSE 0 END) as passed
+        SUM(CASE WHEN UPPER(status) = 'PASSED' THEN 1 ELSE 0 END) as passed
       FROM test_cases
       GROUP BY category
     `).all();
@@ -1876,6 +2835,14 @@ async function startServer() {
 
   app.post("/api/tasks/:id/retry", (req, res) => {
     const taskId = Number(req.params.id);
+    const originalTask = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
+    if (!originalTask) {
+      return res.status(404).json({ error: "Task not found" });
+    }
+    const retryDecision = getRetryDecision(originalTask);
+    if (!retryDecision.canRetry) {
+      return res.status(409).json({ error: retryDecision.reason || "Task is not retryable" });
+    }
     const cloned = cloneExecutionTask(taskId);
     if (!cloned) {
       return res.status(404).json({ error: "Task not found" });
@@ -1890,10 +2857,21 @@ async function startServer() {
 
   app.post("/api/test-suites/:id/run", (req, res) => {
     const suiteId = Number(req.params.id);
-    const { stop_on_failure } = req.body || {};
+    const { stop_on_failure, asset_id, runtime_inputs } = req.body || {};
     const suite = db.prepare("SELECT * FROM test_suites WHERE id = ?").get(suiteId);
     if (!suite) {
       return res.status(404).json({ error: "Suite not found" });
+    }
+    const assetId = Number(asset_id);
+    if (!assetId) {
+      return res.status(400).json({ error: "asset_id is required for suite execution" });
+    }
+    const asset = db.prepare("SELECT id, status FROM assets WHERE id = ?").get(assetId) as { id: number; status: string } | undefined;
+    if (!asset) {
+      return res.status(404).json({ error: "Asset not found" });
+    }
+    if (asset.status !== "Online") {
+      return res.status(409).json({ error: "Asset is not online" });
     }
 
     const suiteCases = db.prepare("SELECT test_case_id FROM test_suite_cases WHERE suite_id = ? ORDER BY sort_order ASC, id ASC").all(suiteId) as Array<{ test_case_id: number }>;
@@ -1904,7 +2882,7 @@ async function startServer() {
     const existingRun = db.prepare(`
       SELECT id
       FROM execution_tasks
-      WHERE suite_id = ? AND status IN ('Queued', 'Running')
+      WHERE suite_id = ? AND status IN ('PENDING', 'RUNNING')
       ORDER BY started_at DESC
       LIMIT 1
     `).get(suiteId);
@@ -1914,10 +2892,12 @@ async function startServer() {
 
     const taskId = createExecutionTask({
       type: "suite",
+      assetId,
       suiteId,
       testCaseIds: suiteCases.map(item => item.test_case_id),
       initiatedBy: "User",
       stopOnFailure: Boolean(stop_on_failure),
+      runtimeInputs: runtime_inputs && typeof runtime_inputs === "object" ? runtime_inputs : {},
     });
     scheduleExecutionTask(taskId);
 
@@ -2060,7 +3040,7 @@ async function startServer() {
     const activeTask = db.prepare(`
       SELECT id
       FROM execution_tasks
-      WHERE asset_id = ? AND status IN ('Queued', 'Running')
+      WHERE asset_id = ? AND status IN ('PENDING', 'RUNNING')
       LIMIT 1
     `).get(assetId);
 
@@ -2098,7 +3078,7 @@ async function startServer() {
         type: "Automated", 
         protocol: "CAN", 
         description: "监控自动化测试运行、ECU 仿真及整车诊断。", 
-        status: "Running",
+        status: "RUNNING",
         steps: JSON.stringify([
           "初始化 CAN 总线连接",
           "加载压力测试脚本 v2.1",
@@ -2113,7 +3093,7 @@ async function startServer() {
         type: "Automated", 
         protocol: "OTA", 
         description: "整车 (VIN: WA1...) OTA 更新流程验证。", 
-        status: "Passed",
+        status: "PASSED",
         steps: JSON.stringify([
           "建立与 OTA 服务器的安全连接",
           "下载固件包 (v1.0.4)",
@@ -2128,7 +3108,7 @@ async function startServer() {
         type: "Manual", 
         protocol: "HIL", 
         description: "组件 (ECU) 硬件在环诊断功能验证。", 
-        status: "Passed",
+        status: "PASSED",
         steps: JSON.stringify([
           "连接 HIL 仿真机柜",
           "启动诊断会话 (UDS)",
@@ -2143,7 +3123,7 @@ async function startServer() {
         type: "Automated", 
         protocol: "BMS", 
         description: "组件 (BMS) 电池热管理与安全预警测试。", 
-        status: "Failed",
+        status: "FAILED",
         steps: JSON.stringify([
           "模拟电芯温度异常升高",
           "触发热失控预警信号",
@@ -2158,7 +3138,7 @@ async function startServer() {
         type: "Manual", 
         protocol: "Ethernet", 
         description: "整车网关安全策略与防火墙规则验证。", 
-        status: "Blocked",
+        status: "BLOCKED",
         steps: JSON.stringify([
           "扫描开放端口",
           "尝试未授权的 SSH 访问",
@@ -2173,10 +3153,10 @@ async function startServer() {
 
     // Seed some test runs
     const insertRun = db.prepare("INSERT INTO test_runs (test_case_id, result, logs, duration, executed_by) VALUES (?, ?, ?, ?, ?)");
-    insertRun.run(1, 'Running', 'CAN traffic high load...', 765, 'System');
-    insertRun.run(2, 'Passed', 'OTA update successful', 192, 'Admin');
-    insertRun.run(3, 'Passed', 'Diagnostics clear', 485, 'Tester');
-    insertRun.run(4, 'Failed', 'Thermal threshold exceeded', 320, 'System');
+    insertRun.run(1, 'ERROR', 'CAN traffic high load...', 765, 'System');
+    insertRun.run(2, 'PASSED', 'OTA update successful', 192, 'Admin');
+    insertRun.run(3, 'PASSED', 'Diagnostics clear', 485, 'Tester');
+    insertRun.run(4, 'FAILED', 'Thermal threshold exceeded', 320, 'System');
 
     // Seed defects
     const insertDefect = db.prepare("INSERT INTO defects (id, description, module, severity, status) VALUES (?, ?, ?, ?, ?)");
@@ -2202,6 +3182,11 @@ async function startServer() {
     const suiteId = Number(suiteInfo.lastInsertRowid);
     const insertSuiteCase = db.prepare("INSERT INTO test_suite_cases (suite_id, test_case_id, sort_order) VALUES (?, ?, ?)");
     [1, 3, 4, 5].forEach((testCaseId, index) => insertSuiteCase.run(suiteId, testCaseId, index + 1));
+  }
+
+  const baselineSuiteId = ensureSecurityBaselineSuite();
+  if (baselineSuiteId) {
+    console.log(`[suite] Security baseline suite ready (id=${baselineSuiteId})`);
   }
 
   server.listen(PORT, "0.0.0.0", () => {

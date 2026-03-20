@@ -1,0 +1,28 @@
+﻿目标模块/业务域,用例名称,测试协议,测试类型,测试输入,测试工具,测试步骤,预期结果,自动化等级,描述,执行器类型,脚本路径,命令模板,参数模板,超时秒数
+IVI,ADB访问控制验证,ADB,Automated,目标设备连接地址由测试资产自动注入；任务发起时指定 ADB 端口，默认 5555。,ADB,"步骤1：执行 adb connect 目标IP:端口
+步骤2：执行 adb shell getprop ro.build.type
+步骤3：根据是否进入系统判定访问控制结果",默认生产配置下，不应允许未授权主机建立 ADB shell 会话；若可进入 shell，则判定访问控制失败。,A,首批接入。验证目标资产是否暴露 ADB 远程访问能力。,python,scripts/adb_access_check.py,,{{payloadPath}},300
+IVI,SSH访问控制验证,Ethernet,Automated,目标设备连接地址由测试资产自动注入；任务发起时填写一组 SSH 测试账号、测试密码和 SSH 端口。,SSH,"步骤1：探测 SSH 端口是否开放
+步骤2：使用测试账号尝试 SSH 登录
+步骤3：根据是否进入系统判定访问控制结果",默认生产配置下，不应允许测试账号通过 SSH 登录进入系统；若可进入 shell，则判定访问控制失败。,A,首批接入。验证目标资产是否暴露 SSH 远程访问能力。,python,scripts/ssh_access_check.py,,{{payloadPath}},300
+IVI,Telnet访问测试,Ethernet,Automated,目标设备连接地址由测试资产自动注入；任务发起时可指定 Telnet 端口，默认 23。,Telnet,"步骤1：探测 Telnet 端口是否开放
+步骤2：根据服务是否对外暴露判定访问控制结果",默认生产配置下，不应暴露 Telnet 服务；若端口可达，则判定访问控制失败。,A,首批接入。验证目标资产是否暴露 Telnet 远程访问能力。,python,scripts/telnet_access_check.py,,{{payloadPath}},300
+IVI,FTP访问测试,Ethernet,Automated,目标设备连接地址由测试资产自动注入；任务发起时可指定 FTP 端口和一组 FTP 测试账号。,FTP,"步骤1：探测 FTP 端口是否开放
+步骤2：尝试匿名 FTP 登录
+步骤3：使用测试账号尝试 FTP 登录
+步骤4：根据是否可登录判定访问控制结果",默认生产配置下，不应允许匿名或测试账号通过 FTP 获取文件；若可登录，则判定访问控制失败。,A,首批接入。验证目标资产是否暴露 FTP 远程访问能力。,python,scripts/ftp_access_check.py,,{{payloadPath}},300
+IVI,ADB Push测试,ADB,Automated,目标设备连接地址由测试资产自动注入；任务发起时可指定 ADB 端口与待写入路径。,ADB,"步骤1：执行 adb connect 目标IP:端口
+步骤2：执行 adb push 本地探测文件到目标路径
+步骤3：根据是否写入成功判定访问控制结果",默认生产配置下，不应允许未授权主机通过 adb push 写入目标路径；若写入成功，则判定访问控制失败。,A,首批接入。验证目标资产是否允许通过 ADB push 写入文件。,python,scripts/adb_push_check.py,,{{payloadPath}},300
+IVI,ADB pull测试,ADB,Automated,目标设备连接地址由测试资产自动注入；任务发起时可指定 ADB 端口与待拉取路径。,ADB,"步骤1：执行 adb connect 目标IP:端口
+步骤2：执行 adb pull 拉取目标路径文件
+步骤3：根据是否读取成功判定访问控制结果",默认生产配置下，不应允许未授权主机通过 adb pull 拉取目标路径文件；若拉取成功，则判定访问控制失败。,A,首批接入。验证目标资产是否允许通过 ADB pull 读取文件。,python,scripts/adb_pull_check.py,,{{payloadPath}},300
+IVI,系统日志测试,Linux,Manual,,,,,B,建议统一成日志关键字扫描框架，复用 ADB/SSH 上下文。,,,,,
+IVI,Dmesg日志测试,Linux,Manual,,,,,B,单命令型检查，适合 shell。,,,,,
+OTA,OTA升级日志,Linux,Manual,,,,,B,建议与系统日志测试共用规则引擎。,,,,,
+IVI,SELinux策略测试,Linux,Manual,,,,,B,读取 getenforce/sestatus 即可。,,,,,
+IVI,iptables防火墙检测,Linux,Manual,,,,,B,建议兼容 nftables。,,,,,
+IVI,ASLR测试,Linux,Manual,,,,,B,读取 /proc/sys/kernel/randomize_va_space。,,,,,
+IVI,最小权限测试,Linux,Manual,,,,,B,通常需要组合多条命令与目录权限检查。,,,,,
+IVI,系统证书保护测试,Linux,Manual,,,,,B,建议做成证书/密钥目录扫描与权限校验。,,,,,
+IVI/T-BOX,开放端口扫描,Ethernet,Manual,,,,,B,适合用 nmap 或 nc 做白名单扫描。,,,,,

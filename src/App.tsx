@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   LayoutDashboard, 
   PlayCircle, 
@@ -59,6 +59,8 @@ interface TestCase {
   command_template?: string;
   args_template?: string;
   timeout_sec?: number;
+  required_inputs?: string;
+  default_runtime_inputs?: string;
   status: string;
   created_at: string;
   steps?: string; // JSON string
@@ -81,6 +83,15 @@ interface StepExecutionResult {
   result: string;
   logs?: string;
   duration?: number;
+  command?: string;
+  command_result?: string;
+  output?: string;
+  security_assessment?: string;
+  exit_code?: number | null;
+  stdout?: string;
+  stderr?: string;
+  timestamp?: string;
+  conclusion?: string;
 }
 
 interface RecentRun {
@@ -135,7 +146,7 @@ interface SuiteRun {
 interface ExecutionTask {
   id: number;
   type: 'single' | 'suite';
-  status: 'Queued' | 'Running' | 'Completed' | 'Failed' | 'Cancelled';
+  status: string;
   asset_id?: number | null;
   asset_name?: string | null;
   suite_id?: number | null;
@@ -157,6 +168,10 @@ interface ExecutionTask {
   executor?: string | null;
   retry_count?: number;
   source_task_id?: number | null;
+  runtime_inputs?: string | null;
+  failure_category?: 'NONE' | 'ENVIRONMENT' | 'PERMISSION' | 'SCRIPT' | string | null;
+  can_retry?: boolean;
+  retry_block_reason?: string | null;
 }
 
 interface ExecutionTaskDetailItem {
@@ -166,6 +181,7 @@ interface ExecutionTaskDetailItem {
   sort_order: number;
   status: string;
   result?: string | null;
+  failure_category?: string | null;
   run_id?: number | null;
   started_at?: string | null;
   finished_at?: string | null;
@@ -188,7 +204,143 @@ interface ExecutionTaskDetail {
   items: ExecutionTaskDetailItem[];
 }
 
+type ExecutionStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'CANCELLED';
+type CanonicalTestResult = 'PASSED' | 'FAILED' | 'BLOCKED' | 'ERROR';
+type FailureCategory = 'NONE' | 'ENVIRONMENT' | 'PERMISSION' | 'SCRIPT';
+const SECURITY_BASELINE_SUITE_NAME = '系统安全基线套件';
+
 const CASE_CATEGORY_OPTIONS = ['IVI', 'T-Box', 'Gateway', 'ADAS', 'BMS', 'OTA', '整车', '云控平台', '移动端', 'CAN总线'];
+const REQUIRED_INPUT_OPTIONS = [
+  { value: 'connection_address', label: '连接地址', description: '从测试资产自动带入 IP/主机名。' },
+  { value: 'ssh_probe_username', label: 'SSH 测试账号', description: '任务发起时填写用于尝试登录的测试用户名。' },
+  { value: 'ssh_probe_password', label: 'SSH 测试密码', description: '任务发起时填写用于尝试登录的测试密码。' },
+  { value: 'ssh_port', label: 'SSH 端口', description: '任务发起时填写 SSH 端口，默认 22。' },
+  { value: 'adb_port', label: 'ADB 端口', description: '任务发起时填写 ADB 监听端口，默认 5555。' },
+  { value: 'adb_push_target_path', label: 'ADB Push 目标路径', description: '任务发起时填写待写入的设备路径，默认 /data/local/tmp/iov_probe.txt。' },
+  { value: 'adb_pull_source_path', label: 'ADB Pull 源路径', description: '任务发起时填写待拉取的设备路径，默认 /system/build.prop。' },
+  { value: 'telnet_port', label: 'Telnet 端口', description: '任务发起时填写 Telnet 监听端口，默认 23。' },
+  { value: 'ftp_port', label: 'FTP 端口', description: '任务发起时填写 FTP 监听端口，默认 21。' },
+  { value: 'ftp_probe_username', label: 'FTP 测试账号', description: '任务发起时填写用于尝试登录的 FTP 用户名。' },
+  { value: 'ftp_probe_password', label: 'FTP 测试密码', description: '任务发起时填写用于尝试登录的 FTP 密码。' },
+  { value: 'tls_port', label: 'TLS 端口', description: '任务发起时填写 TLS 服务端口，默认 443。' },
+  { value: 'tls_server_name', label: 'TLS 主机名(SNI)', description: '任务发起时填写 TLS 证书校验主机名，不填则默认连接地址。' },
+];
+
+const DEFAULT_RUNTIME_INPUT_SUGGESTIONS: Record<string, string> = {
+  ssh_port: '22',
+  adb_port: '5555',
+  telnet_port: '23',
+  ftp_port: '21',
+  tls_port: '443',
+};
+
+const inferInputsFromScript = (scriptPath?: string, testTool?: string) => {
+  const normalized = `${scriptPath || ''} ${(testTool || '')}`.toLowerCase();
+  if (normalized.includes('ssh_access_check')) {
+    return ['connection_address', 'ssh_probe_username', 'ssh_probe_password', 'ssh_port'];
+  }
+  if (normalized.includes('adb_push_check')) {
+    return ['connection_address', 'adb_port', 'adb_push_target_path'];
+  }
+  if (normalized.includes('adb_pull_check')) {
+    return ['connection_address', 'adb_port', 'adb_pull_source_path'];
+  }
+  if (normalized.includes('adb_access_check')) {
+    return ['connection_address', 'adb_port'];
+  }
+  if (normalized.includes('iptables_firewall_check')) {
+    return ['connection_address', 'adb_port'];
+  }
+  if (normalized.includes('least_privilege_check')) {
+    return ['connection_address', 'adb_port'];
+  }
+  if (normalized.includes('certificate_protection_check')) {
+    return ['connection_address', 'adb_port'];
+  }
+  if (normalized.includes('open_port_scan_check')) {
+    return ['connection_address'];
+  }
+  if (normalized.includes('telnet_access_check')) {
+    return ['connection_address', 'telnet_port'];
+  }
+  if (normalized.includes('ftp_access_check')) {
+    return ['connection_address', 'ftp_port', 'ftp_probe_username', 'ftp_probe_password'];
+  }
+  if (normalized.includes('ssh_root_login_disabled_check')) {
+    return ['connection_address', 'ssh_probe_password', 'ssh_port'];
+  }
+  if (normalized.includes('ssh_weak_password_policy_check')) {
+    return ['connection_address', 'ssh_port'];
+  }
+  if (normalized.includes('telnet_service_disabled_check')) {
+    return ['connection_address', 'telnet_port'];
+  }
+  if (normalized.includes('ftp_anonymous_login_disabled_check')) {
+    return ['connection_address', 'ftp_port'];
+  }
+  if (normalized.includes('key_directory_permission_check')) {
+    return ['connection_address', 'adb_port'];
+  }
+  if (normalized.includes('suid_sgid_scan_check')) {
+    return ['connection_address', 'adb_port'];
+  }
+  if (normalized.includes('tls_certificate_validation_check')) {
+    return ['connection_address', 'tls_port', 'tls_server_name'];
+  }
+  if (normalized.includes('tls_weak_cipher_check')) {
+    return ['connection_address', 'tls_port', 'tls_server_name'];
+  }
+  if (normalized.includes('ssh_weak_credential_check')) {
+    return ['connection_address', 'ssh_port'];
+  }
+  if (normalized.includes('ssh_account_lockout_check')) {
+    return ['connection_address', 'ssh_probe_username', 'ssh_port'];
+  }
+  if (normalized.includes('ssh')) {
+    return ['connection_address', 'ssh_probe_username', 'ssh_probe_password', 'ssh_port'];
+  }
+  if (normalized.includes('adb')) {
+    return ['connection_address', 'adb_port'];
+  }
+  if (normalized.includes('telnet')) {
+    return ['connection_address', 'telnet_port'];
+  }
+  if (normalized.includes('ftp')) {
+    return ['connection_address', 'ftp_port', 'ftp_probe_username', 'ftp_probe_password'];
+  }
+  return [] as string[];
+};
+
+const normalizeExecutionStatus = (status?: string | null): ExecutionStatus => {
+  const normalized = String(status || '').trim().toUpperCase();
+  if (normalized === 'RUNNING') return 'RUNNING';
+  if (normalized === 'COMPLETED' || normalized === 'FAILED') return 'COMPLETED';
+  if (normalized === 'CANCELLED') return 'CANCELLED';
+  return 'PENDING';
+};
+
+const normalizeTestResult = (result?: string | null): CanonicalTestResult | null => {
+  if (!result) return null;
+  const normalized = String(result).trim().toUpperCase();
+  if (normalized === 'PASSED') return 'PASSED';
+  if (normalized === 'FAILED') return 'FAILED';
+  if (normalized === 'BLOCKED') return 'BLOCKED';
+  if (normalized === 'ERROR') return 'ERROR';
+  return null;
+};
+
+const normalizeFailureCategory = (value?: string | null): FailureCategory => {
+  const normalized = String(value || '').trim().toUpperCase();
+  if (normalized === 'ENVIRONMENT') return 'ENVIRONMENT';
+  if (normalized === 'PERMISSION') return 'PERMISSION';
+  if (normalized === 'SCRIPT') return 'SCRIPT';
+  return 'NONE';
+};
+
+const isExecutionActive = (status?: string | null) => {
+  const normalized = normalizeExecutionStatus(status);
+  return normalized === 'PENDING' || normalized === 'RUNNING';
+};
 
 // --- Components ---
 
@@ -273,9 +425,15 @@ export default function App() {
   const [showEditAssetModal, setShowEditAssetModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTaskModal, setShowTaskModal] = useState(false);
+  const [launchMode, setLaunchMode] = useState<'suite' | 'cases'>('suite');
   const [showSuiteModal, setShowSuiteModal] = useState(false);
-  const [selectedCaseId, setSelectedCaseId] = useState<number | string>('');
+  const [selectedSuiteId, setSelectedSuiteId] = useState<number | string>('');
+  const [selectedCaseIds, setSelectedCaseIds] = useState<number[]>([]);
+  const [isCasePickerOpen, setIsCasePickerOpen] = useState(false);
+  const [isAssetPickerOpen, setIsAssetPickerOpen] = useState(false);
+  const [isRuntimeInputsOpen, setIsRuntimeInputsOpen] = useState(false);
   const [selectedAssetId, setSelectedAssetId] = useState<number | string>('');
+  const [taskRuntimeInputs, setTaskRuntimeInputs] = useState<Record<string, string>>({});
   const [stopOnFailure, setStopOnFailure] = useState(false);
   const [selectedSuiteCaseIds, setSelectedSuiteCaseIds] = useState<number[]>([]);
   const [importText, setImportText] = useState('');
@@ -305,6 +463,10 @@ export default function App() {
   });
   const [runningSuiteIds, setRunningSuiteIds] = useState<number[]>([]);
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
+  const [createScriptPath, setCreateScriptPath] = useState('');
+  const [createTestTool, setCreateTestTool] = useState('');
+  const [editScriptPath, setEditScriptPath] = useState('');
+  const [editTestTool, setEditTestTool] = useState('');
 
   const filteredTestCases = testCases.filter(tc => {
     const matchesSearch = tc.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
@@ -312,6 +474,140 @@ export default function App() {
     const matchesProtocol = filterProtocol === 'All' || tc.protocol === filterProtocol;
     return matchesSearch && matchesProtocol;
   });
+  const managementFilteredTestCases = useMemo(
+    () =>
+      testCases
+        .filter(
+          (tc) =>
+            tc.title.toLowerCase().includes(managementSearchQuery.toLowerCase()) ||
+            tc.category.toLowerCase().includes(managementSearchQuery.toLowerCase()) ||
+            (tc.test_tool && tc.test_tool.toLowerCase().includes(managementSearchQuery.toLowerCase()))
+        )
+        .sort((a, b) => a.id - b.id),
+    [testCases, managementSearchQuery]
+  );
+
+  const parseRequiredInputs = (value?: string | null) => {
+    if (!value) return [] as string[];
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const parseDefaultRuntimeInputs = (value?: string | null) => {
+    if (!value) return {} as Record<string, string>;
+    try {
+      const parsed = JSON.parse(value);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {} as Record<string, string>;
+      return Object.fromEntries(
+        Object.entries(parsed as Record<string, unknown>)
+          .map(([key, raw]) => [key, String(raw ?? '').trim()] as const)
+          .filter(([, v]) => v !== '')
+      );
+    } catch {
+      return {} as Record<string, string>;
+    }
+  };
+
+  const parseCaseSteps = (value?: string | null) => {
+    if (!value) return [] as string[];
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.map((step) => String(step).trim()).filter(Boolean);
+      }
+      if (typeof parsed === 'string') {
+        return parsed.split(/\r?\n/).map((step) => step.trim()).filter(Boolean);
+      }
+      return [] as string[];
+    } catch {
+      return String(value).split(/\r?\n/).map((step) => step.trim()).filter(Boolean);
+    }
+  };
+
+  const resolveRuntimeInputs = (scriptPath?: string | null, testTool?: string | null, fallback?: string | null) => {
+    const inferred = inferInputsFromScript(scriptPath || undefined, testTool || undefined);
+    if (inferred.length > 0) return inferred;
+    return parseRequiredInputs(fallback);
+  };
+
+  const selectedLaunchTestCases = testCases.filter(tc => selectedCaseIds.includes(tc.id));
+  const selectedLaunchSuite = testSuites.find((suite) => String(suite.id) === String(selectedSuiteId));
+  const selectedBaselineSuite = testSuites.find((suite) => suite.name === SECURITY_BASELINE_SUITE_NAME) || null;
+  const selectedLaunchAsset = assets.find((asset: any) => String(asset.id) === String(selectedAssetId));
+  const onlineAssets = assets.filter((asset: any) => asset.status === 'Online');
+  const createRequiredInputs = useMemo(
+    () => resolveRuntimeInputs(createScriptPath, createTestTool, null),
+    [createScriptPath, createTestTool]
+  );
+  const editRequiredInputs = useMemo(
+    () => resolveRuntimeInputs(editScriptPath, editTestTool, selectedTestCase?.required_inputs),
+    [editScriptPath, editTestTool, selectedTestCase?.required_inputs]
+  );
+  const selectedLaunchRequiredInputs: string[] = Array.from(new Set(
+    selectedLaunchTestCases.flatMap((testCase) => resolveRuntimeInputs(testCase.script_path, testCase.test_tool, testCase.required_inputs))
+  )) as string[];
+  const { selectedLaunchDefaultInputs, selectedLaunchInputConflicts } = useMemo(() => {
+    const merged: Record<string, string> = {};
+    const conflicts = new Set<string>();
+
+    selectedLaunchTestCases.forEach((testCase) => {
+      const defaults = parseDefaultRuntimeInputs(testCase.default_runtime_inputs);
+      resolveRuntimeInputs(testCase.script_path, testCase.test_tool, testCase.required_inputs).forEach((inputKey) => {
+        if (inputKey === 'connection_address') return;
+        const suggestedValue = defaults[inputKey];
+        if (!suggestedValue) return;
+        if (!(inputKey in merged)) {
+          merged[inputKey] = suggestedValue;
+          return;
+        }
+        if (merged[inputKey] !== suggestedValue) {
+          merged[inputKey] = '';
+          conflicts.add(inputKey);
+        }
+      });
+    });
+
+    selectedLaunchRequiredInputs.forEach((inputKey) => {
+      if (inputKey === 'connection_address') return;
+      if (!(inputKey in merged) || merged[inputKey] === '') {
+        const suggested = DEFAULT_RUNTIME_INPUT_SUGGESTIONS[inputKey];
+        if (suggested && !conflicts.has(inputKey)) {
+          merged[inputKey] = suggested;
+        }
+      }
+    });
+
+    return {
+      selectedLaunchDefaultInputs: merged,
+      selectedLaunchInputConflicts: Array.from(conflicts),
+    };
+  }, [selectedLaunchTestCases, selectedLaunchRequiredInputs]);
+  const selectedAssetSummary = selectedLaunchAsset
+    ? `${selectedLaunchAsset.name} · ${selectedLaunchAsset.connection_address || '未配置连接地址'}`
+    : '请选择一个在线资产';
+  const selectedCaseSummary = selectedLaunchTestCases.length === 0
+    ? '请选择一个或多个测试用例'
+    : selectedLaunchTestCases.map((testCase) => testCase.title).join('、');
+  const selectedSuiteSummary = selectedLaunchSuite
+    ? `${selectedLaunchSuite.name}（${selectedLaunchSuite.case_count} 条）`
+    : '请选择一个测试套件';
+
+  useEffect(() => {
+    if (!showCreateModal) {
+      setCreateScriptPath('');
+      setCreateTestTool('');
+    }
+  }, [showCreateModal]);
+
+  useEffect(() => {
+    if (!showEditModal || !selectedTestCase) return;
+    setEditScriptPath(selectedTestCase.script_path || '');
+    setEditTestTool(selectedTestCase.test_tool || '');
+  }, [showEditModal, selectedTestCase]);
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem('iov-core-theme') as 'dark' | 'light' | null;
@@ -319,6 +615,44 @@ export default function App() {
     const nextTheme = savedTheme || preferredTheme;
     setTheme(nextTheme);
   }, []);
+
+  useEffect(() => {
+    if (!showTaskModal || launchMode !== 'cases') return;
+    setTaskRuntimeInputs((prev) => {
+      const next: Record<string, string> = {};
+      selectedLaunchRequiredInputs.forEach((key: string) => {
+        if (key !== 'connection_address') {
+          next[key] = prev[key] || selectedLaunchDefaultInputs[key] || '';
+        }
+      });
+      return next;
+    });
+  }, [showTaskModal, launchMode, selectedCaseIds, selectedLaunchDefaultInputs, selectedLaunchRequiredInputs]);
+
+  useEffect(() => {
+    if (!showTaskModal) {
+      setIsRuntimeInputsOpen(false);
+    }
+  }, [showTaskModal]);
+
+  useEffect(() => {
+    if (launchMode === 'suite') {
+      setTaskRuntimeInputs({});
+      setIsRuntimeInputsOpen(false);
+    }
+  }, [launchMode]);
+
+  useEffect(() => {
+    if (!showTaskModal || launchMode !== 'suite') return;
+    if (selectedSuiteId) return;
+    if (selectedBaselineSuite) {
+      setSelectedSuiteId(String(selectedBaselineSuite.id));
+      return;
+    }
+    if (testSuites.length > 0) {
+      setSelectedSuiteId(String(testSuites[0].id));
+    }
+  }, [showTaskModal, launchMode, selectedSuiteId, selectedBaselineSuite, testSuites]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -396,7 +730,7 @@ export default function App() {
       setSuiteRuns(suiteRunsData);
       setExecutionTasks(tasksData);
       setRecentRuns(recentRunsData);
-      setRunningSuiteIds(suiteRunsData.filter((run: SuiteRun) => run.status === 'Running' || run.status === 'Queued').map((run: SuiteRun) => run.suite_id));
+      setRunningSuiteIds(suiteRunsData.filter((run: SuiteRun) => isExecutionActive(run.status)).map((run: SuiteRun) => run.suite_id));
     } catch (error) {
       console.error('Failed to fetch data:', error);
     } finally {
@@ -430,6 +764,114 @@ export default function App() {
       return Array.isArray(parsed) ? parsed : [];
     } catch {
       return [];
+    }
+  };
+
+  const getStepExecutionBadge = (step: StepExecutionResult) => {
+    const normalizedCommandResult = String(step.command_result || '').trim().toUpperCase();
+    const normalizedStepResult = normalizeTestResult(step.result);
+    if (normalizedCommandResult === 'PASSED' || normalizedCommandResult === 'SUCCEEDED') {
+      return { label: '命令成功', className: 'text-success' };
+    }
+    if (normalizedCommandResult === 'FAILED') {
+      return { label: '命令失败', className: 'text-danger' };
+    }
+    if (normalizedCommandResult === 'BLOCKED') {
+      return { label: '命令阻塞', className: 'text-warning' };
+    }
+    if (normalizedCommandResult === 'ERROR') {
+      return { label: '命令异常', className: 'text-danger' };
+    }
+    if (normalizedStepResult === 'BLOCKED') {
+      return { label: '已阻止', className: 'text-warning' };
+    }
+    if (normalizedStepResult === 'PASSED') {
+      return { label: '通过', className: 'text-success' };
+    }
+    if (normalizedStepResult === 'FAILED') {
+      return { label: '未通过', className: 'text-danger' };
+    }
+    if (normalizedStepResult === 'ERROR') {
+      return { label: '执行异常', className: 'text-danger' };
+    }
+    return { label: step.result, className: 'text-muted' };
+  };
+
+  const getExecutionStatusLabel = (status?: string | null) => {
+    switch (normalizeExecutionStatus(status)) {
+      case 'PENDING':
+        return '排队中';
+      case 'RUNNING':
+        return '执行中';
+      case 'COMPLETED':
+        return '已完成';
+      case 'CANCELLED':
+        return '已取消';
+      default:
+        return status || '排队中';
+    }
+  };
+
+  const getExecutionStatusBadgeClass = (status?: string | null) => {
+    switch (normalizeExecutionStatus(status)) {
+      case 'PENDING':
+        return 'badge-queued';
+      case 'RUNNING':
+        return 'badge-running';
+      case 'COMPLETED':
+        return 'badge-completed';
+      case 'CANCELLED':
+        return 'badge-cancelled';
+      default:
+        return 'badge-info';
+    }
+  };
+
+  const getFailureCategoryMeta = (category?: string | null) => {
+    switch (normalizeFailureCategory(category)) {
+      case 'ENVIRONMENT':
+        return { label: '环境失败', className: 'text-warning' };
+      case 'PERMISSION':
+        return { label: '权限失败', className: 'text-danger' };
+      case 'SCRIPT':
+        return { label: '脚本失败', className: 'text-accent' };
+      default:
+        return { label: '无', className: 'text-muted' };
+    }
+  };
+
+  const getTestResultBadge = (result?: string | null) => {
+    switch (normalizeTestResult(result)) {
+      case 'PASSED':
+        return {
+          className: 'text-success',
+          icon: <ShieldCheck size={12} />,
+          label: '测试通过',
+        };
+      case 'FAILED':
+        return {
+          className: 'text-danger',
+          icon: <AlertTriangle size={12} />,
+          label: '测试不通过',
+        };
+      case 'BLOCKED':
+        return {
+          className: 'text-warning',
+          icon: <Clock size={12} />,
+          label: '条件不足',
+        };
+      case 'ERROR':
+        return {
+          className: 'text-danger',
+          icon: <AlertTriangle size={12} />,
+          label: '执行异常',
+        };
+      default:
+        return {
+          className: 'text-muted',
+          icon: <Clock size={12} />,
+          label: '未产出',
+        };
     }
   };
 
@@ -521,7 +963,7 @@ export default function App() {
     return acc;
   }, {} as Record<string, number>);
   const totalRuns = stats?.results?.reduce((sum, item) => sum + Number(item.count || 0), 0) || 0;
-  const passedRuns = stats?.results?.find((item) => item.result === 'Passed')?.count || 0;
+  const passedRuns = stats?.results?.find((item) => normalizeTestResult(item.result) === 'PASSED')?.count || 0;
   const reliability = totalRuns > 0 ? Math.round((passedRuns / totalRuns) * 100) : 0;
   const latestTrend = trendData[trendData.length - 1];
   const previousTrend = trendData[trendData.length - 2];
@@ -649,10 +1091,26 @@ export default function App() {
     }
   };
 
+  const collectDefaultRuntimeInputs = (formData: FormData, inputKeys: string[]) => {
+    const defaults: Record<string, string> = {};
+    inputKeys.forEach((inputKey) => {
+      if (inputKey === 'connection_address') return;
+      const value = String(formData.get(`default_input_${inputKey}`) || '').trim();
+      if (value) {
+        defaults[inputKey] = value;
+      }
+    });
+    return defaults;
+  };
+
   const createTestCase = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     const steps = (formData.get('steps') as string).split('\n').filter(s => s.trim());
+    const scriptPath = String(formData.get('script_path') || '').trim();
+    const testTool = String(formData.get('test_tool') || '').trim();
+    const required_inputs = resolveRuntimeInputs(scriptPath, testTool, null);
+    const default_runtime_inputs = collectDefaultRuntimeInputs(formData, required_inputs);
     const newCase = {
       title: formData.get('title'),
       category: formData.get('category'),
@@ -665,10 +1123,12 @@ export default function App() {
       expected_result: formData.get('expected_result'),
       automation_level: formData.get('automation_level'),
       executor_type: formData.get('executor_type'),
-      script_path: formData.get('script_path'),
-      command_template: formData.get('command_template'),
-      args_template: formData.get('args_template'),
+      script_path: scriptPath,
+      command_template: '',
+      args_template: '',
       timeout_sec: formData.get('timeout_sec'),
+      required_inputs,
+      default_runtime_inputs,
     };
 
     try {
@@ -681,6 +1141,8 @@ export default function App() {
         addToast('测试用例创建成功', 'success');
         fetchData();
         setShowCreateModal(false);
+        setCreateScriptPath('');
+        setCreateTestTool('');
       }
     } catch (error) {
       addToast('创建失败', 'error');
@@ -689,24 +1151,52 @@ export default function App() {
 
   const createTestTask = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedCaseId || !selectedAssetId) return;
+    if (!selectedAssetId) return;
+    if (launchMode === 'suite' && !selectedSuiteId) return;
+    if (launchMode === 'cases' && selectedCaseIds.length === 0) return;
+    const runtimeInputs = Object.fromEntries(
+      Object.entries(taskRuntimeInputs)
+        .map(([key, value]) => [key, String(value).trim()] as const)
+        .filter(([, value]) => value !== '')
+    );
 
     try {
-      const res = await fetch('/api/test-runs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          test_case_id: selectedCaseId,
-          asset_id: selectedAssetId,
-          stop_on_failure: stopOnFailure,
-        })
-      });
+      const res = launchMode === 'suite'
+        ? await fetch(`/api/test-suites/${selectedSuiteId}/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              asset_id: selectedAssetId,
+              stop_on_failure: stopOnFailure,
+              runtime_inputs: runtimeInputs,
+            }),
+          })
+        : await fetch('/api/test-runs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              test_case_ids: selectedCaseIds,
+              asset_id: selectedAssetId,
+              stop_on_failure: stopOnFailure,
+              runtime_inputs: runtimeInputs,
+            }),
+          });
       if (res.ok) {
-        addToast('测试任务已发起', 'success');
+        addToast(launchMode === 'suite' ? '基线套件任务已发起' : '测试任务已发起', 'success');
         setShowTaskModal(false);
         setStopOnFailure(false);
+        setTaskRuntimeInputs({});
+        setSelectedCaseIds([]);
+        setIsCasePickerOpen(false);
+        setIsAssetPickerOpen(false);
+        setSelectedAssetId('');
+        setSelectedSuiteId('');
+        setLaunchMode('suite');
         setView('running');
         fetchData();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        addToast(data.error || '发起任务失败', 'error');
       }
     } catch (error) {
       addToast('发起任务失败', 'error');
@@ -718,6 +1208,10 @@ export default function App() {
     if (!selectedTestCase) return;
     const formData = new FormData(e.currentTarget);
     const steps = (formData.get('steps') as string).split('\n').filter(s => s.trim());
+    const scriptPath = String(formData.get('script_path') || '').trim();
+    const testTool = String(formData.get('test_tool') || '').trim();
+    const required_inputs = resolveRuntimeInputs(scriptPath, testTool, selectedTestCase.required_inputs);
+    const default_runtime_inputs = collectDefaultRuntimeInputs(formData, required_inputs);
     const updatedCase = {
       title: formData.get('title'),
       category: formData.get('category'),
@@ -730,10 +1224,12 @@ export default function App() {
       expected_result: formData.get('expected_result'),
       automation_level: formData.get('automation_level'),
       executor_type: formData.get('executor_type'),
-      script_path: formData.get('script_path'),
-      command_template: formData.get('command_template'),
-      args_template: formData.get('args_template'),
+      script_path: scriptPath,
+      command_template: '',
+      args_template: '',
       timeout_sec: formData.get('timeout_sec'),
+      required_inputs,
+      default_runtime_inputs,
     };
 
     try {
@@ -748,6 +1244,8 @@ export default function App() {
           ...updatedCase,
           timeout_sec: Number(updatedCase.timeout_sec || selectedTestCase.timeout_sec || 300),
           steps: JSON.stringify(steps),
+          required_inputs: JSON.stringify(required_inputs),
+          default_runtime_inputs: JSON.stringify(default_runtime_inputs),
         } as TestCase;
         addToast('测试用例已更新', 'success');
         fetchData();
@@ -782,9 +1280,46 @@ export default function App() {
           description: parts[9] || '',
           executor_type: parts[10] || 'python',
           script_path: parts[11] || '',
-          command_template: parts[12] || '',
-          args_template: parts[13] || '',
+          command_template: '',
+          args_template: '',
           timeout_sec: parts[14] || '300',
+          default_runtime_inputs: (() => {
+            if (!parts[15]) return {};
+            try {
+              const parsed = JSON.parse(parts[15]);
+              return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+            } catch {
+              return {};
+            }
+          })(),
+        };
+      }
+      if (parts.length >= 14) {
+        return {
+          category: parts[0],
+          title: parts[1],
+          protocol: parts[2],
+          type: parts[3],
+          test_input: parts[4],
+          test_tool: parts[5],
+          steps: parts[6],
+          expected_result: parts[7],
+          automation_level: parts[8],
+          description: parts[9] || '',
+          executor_type: parts[10] || 'python',
+          script_path: parts[11] || '',
+          command_template: '',
+          args_template: '',
+          timeout_sec: parts[12] || '300',
+          default_runtime_inputs: (() => {
+            if (!parts[13]) return {};
+            try {
+              const parsed = JSON.parse(parts[13]);
+              return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+            } catch {
+              return {};
+            }
+          })(),
         };
       }
       if (parts.length >= 10) {
@@ -804,6 +1339,7 @@ export default function App() {
           command_template: '',
           args_template: '',
           timeout_sec: '300',
+          default_runtime_inputs: {},
         };
       }
       return {
@@ -819,6 +1355,7 @@ export default function App() {
         command_template: '',
         args_template: '',
         timeout_sec: '300',
+        default_runtime_inputs: {},
       };
     }).filter(c => c !== null);
 
@@ -893,22 +1430,14 @@ export default function App() {
     );
   };
 
-  const runSuite = async (suiteId: number) => {
-    try {
-      const res = await fetch(`/api/test-suites/${suiteId}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stop_on_failure: true }),
-      });
-      if (!res.ok) {
-        throw new Error('Failed to run suite');
-      }
-      addToast('测试套件已加入执行队列（失败即停）', 'success');
-      fetchData();
-      setView('suites');
-    } catch (error) {
-      addToast('启动测试套件失败', 'error');
+  const runSuite = (suiteId: number) => {
+    setLaunchMode('suite');
+    setSelectedSuiteId(String(suiteId));
+    setIsCasePickerOpen(false);
+    if (onlineAssets.length === 1) {
+      setSelectedAssetId(String(onlineAssets[0].id));
     }
+    setShowTaskModal(true);
   };
 
   const cancelTask = async (taskId: number) => {
@@ -929,13 +1458,14 @@ export default function App() {
     try {
       const res = await fetch(`/api/tasks/${taskId}/retry`, { method: 'POST' });
       if (!res.ok) {
-        throw new Error('Failed to retry task');
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to retry task');
       }
       addToast('任务已重新加入执行队列', 'success');
       fetchData();
       setView('running');
     } catch (error) {
-      addToast('重试任务失败', 'error');
+      addToast(error instanceof Error ? error.message : '重试任务失败', 'error');
     }
   };
 
@@ -975,7 +1505,7 @@ export default function App() {
     boxShadow: theme === 'dark' ? '0 18px 40px rgba(0,0,0,0.32)' : '0 18px 40px rgba(148,163,184,0.18)',
   } as const;
   const tooltipItemStyle = { color: theme === 'dark' ? '#ffffff' : '#0f172a' };
-  const activeExecutionTasks = executionTasks.filter(task => task.status === 'Running' || task.status === 'Queued');
+  const activeExecutionTasks = executionTasks.filter(task => isExecutionActive(task.status));
   const runningTaskCount = activeExecutionTasks.length;
 
   const toggleSetting = async (key: string) => {
@@ -1133,7 +1663,17 @@ export default function App() {
                     ))}
                   </div>
                   <button 
-                    onClick={() => setShowTaskModal(true)}
+                    onClick={() => {
+                      setLaunchMode('suite');
+                      setIsCasePickerOpen(false);
+                      if (selectedBaselineSuite) {
+                        setSelectedSuiteId(String(selectedBaselineSuite.id));
+                      }
+                      if (onlineAssets.length === 1) {
+                        setSelectedAssetId(String(onlineAssets[0].id));
+                      }
+                      setShowTaskModal(true);
+                    }}
                     className="bg-accent px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-[#4433EE] transition-colors shadow-lg shadow-accent/20"
                   >
                     <Plus size={16} />
@@ -1191,7 +1731,7 @@ export default function App() {
                         <tr>
                           <th className="table-header">目标资产</th>
                           <th className="table-header">测试类型</th>
-                          <th className="table-header">状态</th>
+                          <th className="table-header">执行状态</th>
                           <th className="table-header">测试结果</th>
                           <th className="table-header">耗时</th>
                         </tr>
@@ -1231,44 +1771,20 @@ export default function App() {
                               <div className="text-xs">{run.test_case_title}</div>
                             </td>
                             <td className="py-4 px-4">
-                              <span className={`badge ${
-                                (run.task_status || run.test_case_status) === 'Running' ? 'badge-info' :
-                                (run.task_status || run.test_case_status) === 'Passed' || run.result === 'Passed' ? 'badge-success' :
-                                (run.task_status || run.test_case_status) === 'Failed' || run.result === 'Failed' ? 'badge-danger' :
-                                (run.task_status || run.test_case_status) === 'Blocked' ? 'badge-warning' : 'badge-info'
-                              }`}>
-                                {run.task_status || run.test_case_status || 'Completed'}
+                              <span className={`badge ${getExecutionStatusBadgeClass(run.task_status || 'COMPLETED')}`}>
+                                {getExecutionStatusLabel(run.task_status || 'COMPLETED')}
                               </span>
                             </td>
                             <td className="py-4 px-4">
-                              {run.result === 'Running' || run.task_status === 'Running' ? (
-                                <div className="flex items-center gap-2 text-accent">
-                                  <motion.div
-                                    animate={{ rotate: 360 }}
-                                    transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                                  >
-                                    <Zap size={12} />
-                                  </motion.div>
-                                  <span className="text-[10px] font-bold">执行中...</span>
-                                </div>
-                              ) : run.result === 'Failed' ? (
-                                <div className="flex items-center gap-2 text-danger">
-                                  <AlertTriangle size={12} />
-                                  <span className="font-bold text-[10px]">执行失败</span>
-                                </div>
-                              ) : run.result === 'Passed' ? (
-                                <div className="flex items-center gap-2 text-success">
-                                  <ShieldCheck size={12} />
-                                  <span className="font-bold text-[10px]">全部通过</span>
-                                </div>
-                              ) : run.result === 'Blocked' ? (
-                                <div className="flex items-center gap-2 text-warning">
-                                  <Clock size={12} />
-                                  <span className="font-bold text-[10px]">已阻塞</span>
-                                </div>
-                              ) : (
-                                <span className="text-muted text-[10px]">未执行</span>
-                              )}
+                              {(() => {
+                                const badge = getTestResultBadge(run.result);
+                                return (
+                                  <div className={`flex items-center gap-2 ${badge.className}`}>
+                                    {badge.icon}
+                                    <span className="font-bold text-[10px]">{badge.label}</span>
+                                  </div>
+                                );
+                              })()}
                             </td>
                             <td className="py-4 px-4 text-text-secondary font-mono text-xs">
                               {formatDuration(run.duration)}
@@ -1442,16 +1958,10 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
-                    {testCases
-                      .filter(tc => 
-                        tc.title.toLowerCase().includes(managementSearchQuery.toLowerCase()) ||
-                        tc.category.toLowerCase().includes(managementSearchQuery.toLowerCase()) ||
-                        (tc.test_tool && tc.test_tool.toLowerCase().includes(managementSearchQuery.toLowerCase()))
-                      )
-                      .map((tc, index) => (
+                    {managementFilteredTestCases.map((tc, index) => (
                       <tr key={tc.id} className="hover:bg-white/2 transition-colors group">
                         <td className="px-6 py-4 text-xs text-muted font-mono">
-                          {String(index + 1).padStart(2, '0')}
+                          {index + 1}
                         </td>
                         <td className="px-8 py-4">
                           <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-white/5 text-muted">
@@ -1473,13 +1983,13 @@ export default function App() {
                         </td>
                         <td className="px-8 py-4">
                           <div className="flex gap-2 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button onClick={() => setSelectedTestCase(tc)} className="p-1.5 hover:bg-white/10 rounded text-muted hover:text-white">
+                            <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); setShowEditModal(false); setSelectedTestCase(tc); }} className="p-1.5 hover:bg-white/10 rounded text-muted hover:text-white">
                               <Search size={14} />
                             </button>
-                            <button onClick={() => { setSelectedTestCase(tc); setShowEditModal(true); }} className="p-1.5 hover:bg-white/10 rounded text-muted hover:text-white">
+                            <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); setSelectedTestCase(tc); setShowEditModal(true); }} className="p-1.5 hover:bg-white/10 rounded text-muted hover:text-white">
                               <Edit3 size={14} />
                             </button>
-                            <button onClick={() => deleteTestCase(tc.id)} className="p-1.5 hover:bg-white/10 rounded text-danger/50 hover:text-danger">
+                            <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); deleteTestCase(tc.id); }} className="p-1.5 hover:bg-white/10 rounded text-danger/50 hover:text-danger">
                               <Trash2 size={14} />
                             </button>
                           </div>
@@ -1521,6 +2031,11 @@ export default function App() {
                             <div>
                               <div className="flex items-center gap-3 mb-2">
                                 <h4 className="font-bold text-lg">{suite.name}</h4>
+                                {suite.name === SECURITY_BASELINE_SUITE_NAME ? (
+                                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-accent/20 text-accent">
+                                    Baseline
+                                  </span>
+                                ) : null}
                                 <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-white/5 text-muted">
                                   {suite.case_count} 条用例
                                 </span>
@@ -1530,10 +2045,10 @@ export default function App() {
                             <div className="flex gap-2 shrink-0">
                               <button
                                 onClick={() => runSuite(suite.id)}
-                                disabled={runningSuiteIds.includes(suite.id)}
+                                disabled={runningSuiteIds.includes(suite.id) || onlineAssets.length === 0}
                                 className="px-3 py-2 rounded-lg bg-accent text-white text-[10px] font-bold uppercase disabled:opacity-50"
                               >
-                                {runningSuiteIds.includes(suite.id) ? '执行中' : '执行套件'}
+                                {runningSuiteIds.includes(suite.id) ? '执行中' : '选择资产执行'}
                               </button>
                               <button
                                 onClick={() => deleteSuite(suite.id)}
@@ -1570,11 +2085,11 @@ export default function App() {
                                 </div>
                               </div>
                               <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
-                                run.status === 'Completed' ? 'bg-success/20 text-success' :
-                                run.status === 'Running' ? 'bg-accent/20 text-accent' :
+                                normalizeExecutionStatus(run.status) === 'COMPLETED' ? 'bg-success/20 text-success' :
+                                normalizeExecutionStatus(run.status) === 'RUNNING' ? 'bg-accent/20 text-accent' :
                                 'bg-warning/20 text-warning'
                               }`}>
-                                {run.status}
+                                {getExecutionStatusLabel(run.status)}
                               </span>
                             </div>
                             <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
@@ -1642,13 +2157,14 @@ export default function App() {
                           </div>
                         </div>
                         <div className="flex items-center gap-4 text-[10px] text-muted font-mono">
-                          <span>状态: {task.status}</span>
+                          <span>状态: {getExecutionStatusLabel(task.status)}</span>
                           <span>完成: {task.completed_items}/{task.total_items}</span>
                           <span>通过: {task.passed_items}</span>
                           <span>失败: {task.failed_items}</span>
                           <span>{task.stop_on_failure ? '策略: 失败即停' : '策略: 全部执行'}</span>
                           <span>执行器: {task.executor || 'python'}</span>
-                          <span className="text-accent">{task.current_case_title ? `当前: ${task.current_case_title}` : '等待调度'}</span>
+                          <span className={getFailureCategoryMeta(task.failure_category).className}>分类: {getFailureCategoryMeta(task.failure_category).label}</span>
+                          <span className="text-accent">{task.current_case_title ? `当前: ${task.current_case_title}` : (normalizeExecutionStatus(task.status) === 'PENDING' ? '等待调度' : '执行中')}</span>
                         </div>
                         {task.error_message && (
                           <div className="mt-2 text-[10px] text-danger font-medium">{task.error_message}</div>
@@ -1664,7 +2180,7 @@ export default function App() {
                         >
                           详情
                         </button>
-                        {(task.status === 'Running' || task.status === 'Queued') ? (
+                        {isExecutionActive(task.status) ? (
                           <button
                             onClick={() => cancelTask(task.id)}
                             className="px-3 py-2 rounded-lg border border-danger/30 text-danger text-[10px] font-bold uppercase"
@@ -1674,7 +2190,9 @@ export default function App() {
                         ) : (
                           <button
                             onClick={() => retryTask(task.id)}
-                            className="px-3 py-2 rounded-lg border border-accent/30 text-accent text-[10px] font-bold uppercase"
+                            disabled={!task.can_retry}
+                            title={task.can_retry ? '按原配置重新执行任务' : (task.retry_block_reason || '当前任务不可重试')}
+                            className="px-3 py-2 rounded-lg border border-accent/30 text-accent text-[10px] font-bold uppercase disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             重试
                           </button>
@@ -1725,7 +2243,9 @@ export default function App() {
                             </button>
                             <button
                               onClick={() => retryTask(task.id)}
-                              className="px-3 py-2 rounded-lg border border-accent/30 text-accent text-[10px] font-bold uppercase"
+                              disabled={!task.can_retry}
+                              title={task.can_retry ? '按原配置重新执行任务' : (task.retry_block_reason || '当前任务不可重试')}
+                              className="px-3 py-2 rounded-lg border border-accent/30 text-accent text-[10px] font-bold uppercase disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               重新执行
                             </button>
@@ -1736,6 +2256,7 @@ export default function App() {
                           <span>{task.stop_on_failure ? '策略: 失败即停' : '策略: 全部执行'}</span>
                           <span>通过: {task.passed_items}</span>
                           <span>失败: {task.failed_items}</span>
+                          <span className={getFailureCategoryMeta(task.failure_category).className}>分类: {getFailureCategoryMeta(task.failure_category).label}</span>
                         </div>
                       </div>
                     </div>
@@ -2073,7 +2594,14 @@ export default function App() {
                 </div>
                 <div>
                   <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试工具</label>
-                  <input name="test_tool" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="例如：ZCANPRO, Wireshark" />
+                  <input
+                    name="test_tool"
+                    type="text"
+                    value={createTestTool}
+                    onChange={(e) => setCreateTestTool(e.target.value)}
+                    className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
+                    placeholder="例如：ADB, SSH, Scapy"
+                  />
                 </div>
                 <div>
                   <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试输入</label>
@@ -2097,20 +2625,48 @@ export default function App() {
                   </div>
                   <div>
                     <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">脚本路径</label>
-                    <input name="script_path" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" placeholder="例如：scripts/security_runner.py" />
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">命令模板</label>
-                    <input name="command_template" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" placeholder="例如：{{pythonExecutable}} {{script_path}} {{payloadPath}}" />
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">参数模板</label>
-                    <input name="args_template" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" placeholder="例如：{{payloadPath}} 或 --host {{target}}" />
+                    <input
+                      name="script_path"
+                      type="text"
+                      value={createScriptPath}
+                      onChange={(e) => setCreateScriptPath(e.target.value)}
+                      className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent"
+                      placeholder="例如：scripts/ssh_access_check.py"
+                    />
                   </div>
                   <div>
                     <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">超时 (秒)</label>
                     <input name="timeout_sec" defaultValue="300" type="number" min="1" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
                   </div>
+                </div>
+                <div className="rounded-xl border border-border bg-white/2 p-4 space-y-3">
+                  <div className="text-[10px] uppercase font-bold text-text-secondary">执行输入需求</div>
+                  {createRequiredInputs.length === 0 ? (
+                    <div className="text-xs text-muted italic">请先填写脚本路径（或测试工具），系统会自动识别所需输入字段。</div>
+                  ) : (
+                    createRequiredInputs.map((inputKey) => {
+                      const option = REQUIRED_INPUT_OPTIONS.find((item) => item.value === inputKey);
+                      return (
+                        <div key={`create-runtime-${inputKey}`} className="rounded-xl border border-border px-3 py-3 space-y-2">
+                          <div className="text-xs font-bold">{option?.label || inputKey}</div>
+                          <div className="text-[10px] text-muted">{option?.description || '运行时由任务上下文提供。'}</div>
+                          {inputKey !== 'connection_address' && (
+                            <div className="space-y-1">
+                              <div className="text-[10px] uppercase font-bold text-text-secondary">默认值</div>
+                              <input
+                                name={`default_input_${inputKey}`}
+                                type={inputKey.toLowerCase().includes('password') ? 'password' : inputKey.endsWith('_port') ? 'number' : 'text'}
+                                min={inputKey.endsWith('_port') ? 1 : undefined}
+                                defaultValue={DEFAULT_RUNTIME_INPUT_SUGGESTIONS[inputKey] || ''}
+                                className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
+                                placeholder={option?.description}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
                 <div>
                   <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试步骤 (每行一步)</label>
@@ -2144,34 +2700,244 @@ export default function App() {
 
               <form onSubmit={createTestTask} className="space-y-6">
                 <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-2 block">选择测试用例</label>
-                  <select 
-                    required
-                    value={selectedCaseId}
-                    onChange={(e) => setSelectedCaseId(e.target.value)}
-                    className="w-full bg-bg border border-border rounded-lg px-3 py-3 text-sm focus:outline-none focus:border-accent"
-                  >
-                    <option value="">请选择一个用例...</option>
-                    {testCases.map(tc => (
-                      <option key={tc.id} value={tc.id}>[{tc.category}] {tc.title}</option>
-                    ))}
-                  </select>
+                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-2 block">任务模式</label>
+                  <div className="rounded-xl border border-border bg-bg p-1 grid grid-cols-2 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setLaunchMode('suite')}
+                      className={`px-3 py-2 rounded-lg text-xs font-bold uppercase transition-colors ${launchMode === 'suite' ? 'bg-accent text-white' : 'text-muted hover:text-text-primary'}`}
+                    >
+                      资产 + 套件
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLaunchMode('cases')}
+                      className={`px-3 py-2 rounded-lg text-xs font-bold uppercase transition-colors ${launchMode === 'cases' ? 'bg-accent text-white' : 'text-muted hover:text-text-primary'}`}
+                    >
+                      资产 + 用例
+                    </button>
+                  </div>
                 </div>
 
                 <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-2 block">选择执行资产</label>
-                  <select 
-                    required
-                    value={selectedAssetId}
-                    onChange={(e) => setSelectedAssetId(e.target.value)}
-                    className="w-full bg-bg border border-border rounded-lg px-3 py-3 text-sm focus:outline-none focus:border-accent"
-                  >
-                    <option value="">请选择一个在线资产...</option>
-                    {assets.filter(a => a.status === 'Online').map(a => (
-                      <option key={a.id} value={a.id}>{a.name} ({a.type})</option>
-                    ))}
-                  </select>
+                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-2 block">1. 选择在线资产</label>
+                  <div className="rounded-xl border border-border bg-white/2 overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setIsAssetPickerOpen((prev) => !prev)}
+                      className="w-full px-4 py-3 flex items-center justify-between gap-4 text-left hover:bg-white/5 transition-colors"
+                    >
+                      <div className="min-w-0">
+                        <div className={`text-sm ${selectedLaunchAsset ? 'text-text-primary font-semibold' : 'text-muted'} truncate`}>
+                          {selectedAssetSummary}
+                        </div>
+                        <div className="text-[10px] text-muted mt-1">点击展开后选择一个在线资产</div>
+                      </div>
+                      <div className={`text-muted transition-transform ${isAssetPickerOpen ? 'rotate-90' : ''}`}>
+                        <ChevronRight size={16} />
+                      </div>
+                    </button>
+
+                    {isAssetPickerOpen && (
+                      <div className="max-h-72 overflow-y-auto space-y-2 border-t border-border p-3">
+                        {onlineAssets.map((asset: any) => {
+                          const checked = String(selectedAssetId) === String(asset.id);
+                          return (
+                            <label key={asset.id} className={`flex items-start gap-3 rounded-xl border px-3 py-3 transition-colors ${checked ? 'border-accent bg-accent/5' : 'border-border bg-transparent'}`}>
+                              <input
+                                type="radio"
+                                name="selected-asset"
+                                checked={checked}
+                                onChange={() => setSelectedAssetId(String(asset.id))}
+                                className="mt-1"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="text-sm font-bold">{asset.name}</div>
+                                  <div className="text-[11px] text-muted font-mono whitespace-nowrap">
+                                    IP:{asset.connection_address || '未配置'}
+                                  </div>
+                                </div>
+                              </div>
+                            </label>
+                          );
+                        })}
+                        {onlineAssets.length === 0 && (
+                          <div className="text-center py-6 text-sm text-muted italic">当前没有在线资产可选</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
+
+                {launchMode === 'suite' ? (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-[10px] uppercase font-bold text-text-secondary block">2. 选择要执行的测试套件</label>
+                      {selectedLaunchSuite ? (
+                        <span className="text-[10px] text-muted font-bold">{selectedLaunchSuite.case_count} 条用例</span>
+                      ) : null}
+                    </div>
+                    <div className="rounded-xl border border-border bg-bg overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setIsCasePickerOpen((prev) => !prev)}
+                        className="w-full min-h-12 px-4 py-3 flex items-center justify-between gap-4 text-left hover:bg-white/5 transition-colors"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className={`text-sm ${selectedLaunchSuite ? 'text-text-primary' : 'text-muted'} truncate`}>
+                            {selectedSuiteSummary}
+                          </div>
+                        </div>
+                        <div className={`text-muted transition-transform ${isCasePickerOpen ? 'rotate-180' : ''}`}>
+                          <ChevronRight size={18} className="rotate-90" />
+                        </div>
+                      </button>
+                      {isCasePickerOpen && (
+                        <div className="max-h-64 overflow-y-auto space-y-2 border-t border-border p-2">
+                          {testSuites.map((suite) => {
+                            const checked = String(selectedSuiteId) === String(suite.id);
+                            const isBaseline = suite.name === SECURITY_BASELINE_SUITE_NAME;
+                            return (
+                              <label key={suite.id} className={`flex items-start gap-3 rounded-lg px-3 py-2 transition-colors ${checked ? 'bg-accent/8' : 'hover:bg-white/5'}`}>
+                                <input
+                                  type="radio"
+                                  name="selected-suite"
+                                  checked={checked}
+                                  onChange={() => setSelectedSuiteId(String(suite.id))}
+                                  className="mt-1"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-sm font-medium flex items-center gap-2">
+                                    <span>{suite.name}</span>
+                                    {isBaseline ? (
+                                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-accent/20 text-accent">Baseline</span>
+                                    ) : null}
+                                  </div>
+                                  <div className="text-[10px] text-muted mt-1">{suite.case_count} 条用例</div>
+                                </div>
+                              </label>
+                            );
+                          })}
+                          {testSuites.length === 0 && (
+                            <div className="text-center py-4 text-[12px] text-muted">暂无可用套件</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-[10px] uppercase font-bold text-text-secondary block">2. 选择要执行的测试用例</label>
+                      <span className="text-[10px] text-muted font-bold">{selectedCaseIds.length} 项已选</span>
+                    </div>
+                    <div className="rounded-xl border border-border bg-bg overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setIsCasePickerOpen((prev) => !prev)}
+                        className="w-full min-h-12 px-4 py-3 flex items-center justify-between gap-4 text-left hover:bg-white/5 transition-colors"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className={`text-sm ${selectedCaseIds.length === 0 ? 'text-muted' : 'text-text-primary'} truncate`}>
+                            {selectedCaseSummary}
+                          </div>
+                        </div>
+                        <div className={`text-muted transition-transform ${isCasePickerOpen ? 'rotate-180' : ''}`}>
+                          <ChevronRight size={18} className="rotate-90" />
+                        </div>
+                      </button>
+
+                      {isCasePickerOpen && (
+                        <div className="max-h-64 overflow-y-auto space-y-2 border-t border-border p-2">
+                          {testCases.map((tc) => {
+                            const checked = selectedCaseIds.includes(tc.id);
+                            return (
+                              <label key={tc.id} className={`flex items-start gap-3 rounded-lg px-3 py-2 transition-colors ${checked ? 'bg-accent/8' : 'hover:bg-white/5'}`}>
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={(e) => {
+                                    setSelectedCaseIds((prev) => e.target.checked ? [...prev, tc.id] : prev.filter((id) => id !== tc.id));
+                                  }}
+                                  className="mt-1"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-sm font-medium">{tc.title}</div>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {launchMode === 'cases' && selectedLaunchRequiredInputs.length > 0 && (
+                  <div className="space-y-3">
+                    {(() => {
+                      const editableRuntimeOptions = REQUIRED_INPUT_OPTIONS.filter(
+                        (option) => option.value !== 'connection_address' && selectedLaunchRequiredInputs.includes(option.value)
+                      );
+                      return (
+                        <div className="rounded-xl border border-border bg-white/2 overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={() => setIsRuntimeInputsOpen((prev) => !prev)}
+                            className="w-full px-4 py-3 flex items-center justify-between gap-4 text-left hover:bg-white/5 transition-colors"
+                          >
+                            <div className="min-w-0">
+                              <div className="text-[10px] uppercase font-bold text-text-secondary tracking-widest">运行时输入</div>
+                              <div className="text-[11px] text-muted mt-1">
+                                {editableRuntimeOptions.length === 0
+                                  ? '无手工输入字段，连接地址将自动注入。'
+                                  : `共 ${editableRuntimeOptions.length} 个可配置字段${selectedLaunchInputConflicts.length > 0 ? `，${selectedLaunchInputConflicts.length} 个默认值冲突` : ''}`}
+                              </div>
+                            </div>
+                            <div className={`text-muted transition-transform ${isRuntimeInputsOpen ? 'rotate-180' : ''}`}>
+                              <ChevronRight size={16} className="rotate-90" />
+                            </div>
+                          </button>
+
+                          {isRuntimeInputsOpen && (
+                            <div className="border-t border-border p-4 space-y-3">
+                              {selectedLaunchInputConflicts.length > 0 && (
+                                <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-xs text-text-secondary">
+                                  已选择用例存在默认值冲突，请手工确认以下字段：{selectedLaunchInputConflicts.map((key) => REQUIRED_INPUT_OPTIONS.find((option) => option.value === key)?.label || key).join('、')}
+                                </div>
+                              )}
+                              {selectedLaunchRequiredInputs.includes('connection_address') && (
+                                <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-xs text-text-secondary">
+                                  连接地址将从所选测试资产自动注入脚本，不需要手工填写。
+                                </div>
+                              )}
+                              {editableRuntimeOptions.map((option) => (
+                                <div key={option.value} className="space-y-2">
+                                  <label className="text-[10px] uppercase font-bold text-text-secondary block">{option.label}</label>
+                                  <input
+                                    type={option.value.toLowerCase().includes('password') ? 'password' : option.value.endsWith('_port') ? 'number' : 'text'}
+                                    value={taskRuntimeInputs[option.value] || ''}
+                                    required={!selectedLaunchDefaultInputs[option.value]}
+                                    min={option.value.endsWith('_port') ? 1 : undefined}
+                                    onChange={(e) => setTaskRuntimeInputs((prev) => ({ ...prev, [option.value]: e.target.value }))}
+                                    className="w-full bg-bg border border-border rounded-lg px-3 py-3 text-sm focus:outline-none focus:border-accent"
+                                    placeholder={selectedLaunchDefaultInputs[option.value] ? `${option.description}（已预填）` : option.description}
+                                  />
+                                  {selectedLaunchDefaultInputs[option.value] && (
+                                    <div className="text-[10px] text-muted">
+                                      已从用例默认值预填：<span className="font-mono">{selectedLaunchDefaultInputs[option.value]}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
 
                 <div className="p-4 rounded-xl bg-accent/5 border border-accent/10">
                   <div className="flex items-center gap-3 text-accent mb-2">
@@ -2179,7 +2945,7 @@ export default function App() {
                     <span className="text-xs font-bold uppercase tracking-wider">任务预检</span>
                   </div>
                   <p className="text-[10px] text-muted leading-relaxed">
-                    发起任务后，系统会按用例匹配执行适配器并加载对应脚本/安全检查逻辑，再与目标资产建立执行链路。
+                    发起任务后，系统会先做前置检查（连接地址、端口连通性、adb/ssh 工具可用性），通过后再执行。
                   </p>
                 </div>
 
@@ -2198,10 +2964,10 @@ export default function App() {
 
                 <button 
                   type="submit" 
-                  disabled={!selectedCaseId || !selectedAssetId}
+                  disabled={launchMode === 'suite' ? (!selectedSuiteId || !selectedAssetId) : (selectedCaseIds.length === 0 || !selectedAssetId)}
                   className="w-full bg-accent py-4 rounded-xl text-xs font-bold uppercase hover:bg-[#4433EE] transition-all shadow-lg shadow-accent/20 disabled:opacity-50"
                 >
-                  立即开始执行
+                  {launchMode === 'suite' ? '对当前资产执行套件' : '对当前资产开始执行'}
                 </button>
               </form>
             </motion.div>
@@ -2292,7 +3058,9 @@ export default function App() {
                   value={importText}
                   onChange={(e) => setImportText(e.target.value)}
                   className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none h-64 scrollbar-hide"
-                  placeholder="| 目标模块/业务域 | 用例名称 | 测试协议 | 测试类型 | 测试输入 | 测试工具 | 测试步骤 | 预期结果 | 自动化等级 | 描述 | 执行器类型 | 脚本路径 | 命令模板 | 参数模板 | 超时秒数 |&#10;| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |&#10;| IVI | SSH访问控制验证 | Ethernet | Automated | 白名单IP/非法IP | SSH | 步骤1\\n步骤2 | 仅授权账号允许登录 | A | 验证IVI SSH访问控制 | python | scripts/security_runner.py | {{pythonExecutable}} {{script_path}} {{payloadPath}} | {{payloadPath}} | 300 |"
+                  placeholder={`| 目标模块/业务域 | 用例名称 | 测试协议 | 测试类型 | 测试输入 | 测试工具 | 测试步骤 | 预期结果 | 自动化等级 | 描述 | 执行器类型 | 脚本路径 | 超时秒数 | 默认输入(JSON) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| IVI | SSH访问控制验证 | Ethernet | Automated | 系统登录IP地址 | SSH | 步骤1\\n步骤2 | 未授权账号应被拒绝 | A | 验证IVI SSH访问控制 | python | scripts/ssh_access_check.py | 300 | {"ssh_port":"22"} |`}
                 />
                 <div className="flex gap-3 pt-4">
                   <button 
@@ -2590,7 +3358,7 @@ export default function App() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div className="p-4 rounded-xl bg-white/2 border border-border">
                     <div className="text-[10px] text-muted uppercase font-bold mb-1">任务状态</div>
-                    <div className="font-bold text-sm">{selectedTaskDetail.task.status}</div>
+                    <div className="font-bold text-sm">{getExecutionStatusLabel(selectedTaskDetail.task.status)}</div>
                   </div>
                   <div className="p-4 rounded-xl bg-white/2 border border-border">
                     <div className="text-[10px] text-muted uppercase font-bold mb-1">执行资产</div>
@@ -2603,6 +3371,22 @@ export default function App() {
                   <div className="p-4 rounded-xl bg-white/2 border border-border">
                     <div className="text-[10px] text-muted uppercase font-bold mb-1">重试次数</div>
                     <div className="font-bold text-sm">{selectedTaskDetail.task.retry_count || 0}</div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">失败分类</div>
+                    <div className={`font-bold text-sm ${getFailureCategoryMeta(selectedTaskDetail.task.failure_category).className}`}>
+                      {getFailureCategoryMeta(selectedTaskDetail.task.failure_category).label}
+                    </div>
+                  </div>
+                  <div className="p-4 rounded-xl bg-white/2 border border-border">
+                    <div className="text-[10px] text-muted uppercase font-bold mb-1">重试策略</div>
+                    <div className="font-bold text-sm">{selectedTaskDetail.task.can_retry ? '可重试' : '不可重试'}</div>
+                    {!selectedTaskDetail.task.can_retry && selectedTaskDetail.task.retry_block_reason ? (
+                      <div className="text-[10px] text-muted mt-1">{selectedTaskDetail.task.retry_block_reason}</div>
+                    ) : null}
                   </div>
                 </div>
 
@@ -2643,18 +3427,20 @@ export default function App() {
                       <div key={item.id} className="rounded-2xl border border-border bg-white/2 p-4 space-y-3">
                         <div className="flex items-start justify-between gap-4">
                           <div>
-                            <div className="font-bold text-sm">{item.sort_order + 1}. {item.title}</div>
+                            <div className="font-bold text-sm">{item.sort_order}. {item.title}</div>
                             <div className="text-[10px] text-muted uppercase font-bold mt-1">
                               {item.category || '未分类'} • {item.protocol || '未标记协议'} • {item.test_tool || '未指定工具'}
                             </div>
                           </div>
                           <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
-                            (item.result || item.run_result) === 'Passed' ? 'bg-success/20 text-success' :
-                            (item.result || item.run_result) === 'Failed' ? 'bg-danger/20 text-danger' :
-                            item.status === 'Running' ? 'bg-accent/20 text-accent' :
+                            normalizeTestResult(item.result || item.run_result) === 'PASSED' ? 'bg-success/20 text-success' :
+                            normalizeTestResult(item.result || item.run_result) === 'FAILED' ? 'bg-danger/20 text-danger' :
+                            normalizeTestResult(item.result || item.run_result) === 'ERROR' ? 'bg-danger/20 text-danger' :
+                            normalizeTestResult(item.result || item.run_result) === 'BLOCKED' ? 'bg-warning/20 text-warning' :
+                            normalizeExecutionStatus(item.status) === 'RUNNING' ? 'bg-accent/20 text-accent' :
                             'bg-white/5 text-muted'
                           }`}>
-                            {item.result || item.run_result || item.status}
+                            {normalizeTestResult(item.result || item.run_result) || getExecutionStatusLabel(item.status)}
                           </span>
                         </div>
 
@@ -2686,15 +3472,50 @@ export default function App() {
                           <div className="rounded-xl border border-border bg-white/2 p-3 space-y-2">
                             <div className="text-[10px] text-muted uppercase font-bold mb-1">脚本返回步骤结果</div>
                             {parseStepResults(item.step_results).map((step, index) => (
-                              <div key={`${item.id}-${index}`} className="flex items-start justify-between gap-3 rounded-lg border border-border bg-white/2 px-3 py-2">
-                                <div className="text-xs text-text-secondary">{step.name}</div>
-                                <span className={`text-[10px] font-bold uppercase ${
-                                  step.result === 'Passed' ? 'text-success' :
-                                  step.result === 'Failed' ? 'text-danger' :
-                                  step.result === 'Blocked' ? 'text-warning' : 'text-muted'
-                                }`}>
-                                  {step.result}
-                                </span>
+                              <div key={`${item.id}-${index}`} className="rounded-lg border border-border bg-white/2 px-3 py-3 space-y-1.5">
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="min-w-0 text-sm text-text-primary font-semibold">
+                                    {step.name}
+                                  </div>
+                                  <span className={`text-[10px] font-bold uppercase ${getStepExecutionBadge(step).className}`}>
+                                    {getStepExecutionBadge(step).label}
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-text-secondary">
+                                  {step.conclusion || step.security_assessment || step.logs || '无额外结论。'}
+                                </div>
+                                {(step.command || step.stdout || step.stderr || step.output || typeof step.exit_code === 'number' || step.timestamp) && (
+                                  <details className="rounded-md border border-border bg-black/10 px-2 py-1">
+                                    <summary className="text-[10px] text-muted cursor-pointer select-none">展开明细</summary>
+                                    <div className="mt-2 space-y-1.5 text-[11px] text-text-secondary">
+                                      {step.command ? (
+                                        <div>
+                                          命令: <span className="font-mono break-all">{step.command}</span>
+                                        </div>
+                                      ) : null}
+                                      {typeof step.exit_code === 'number' ? (
+                                        <div>
+                                          退出码: <span className="font-mono">{step.exit_code}</span>
+                                        </div>
+                                      ) : null}
+                                      {step.timestamp ? (
+                                        <div>
+                                          时间: <span className="font-mono">{formatServerDateTime(step.timestamp)}</span>
+                                        </div>
+                                      ) : null}
+                                      {step.stdout || step.output ? (
+                                        <div>
+                                          stdout: <span className="font-mono break-all">{step.stdout || step.output}</span>
+                                        </div>
+                                      ) : null}
+                                      {step.stderr ? (
+                                        <div>
+                                          stderr: <span className="font-mono break-all">{step.stderr}</span>
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  </details>
+                                )}
                               </div>
                             ))}
                           </div>
@@ -2753,7 +3574,7 @@ export default function App() {
                 </button>
               </div>
 
-              <form onSubmit={editTestCase} className="flex-1 overflow-y-auto p-8 space-y-8 scrollbar-hide">
+              <form key={`${selectedTestCase.id}-${showEditModal ? 'edit' : 'view'}`} onSubmit={editTestCase} className="flex-1 overflow-y-auto p-8 space-y-8 scrollbar-hide">
                   {/* Actions */}
                   <div className="flex gap-3">
                     {showEditModal ? (
@@ -2777,9 +3598,9 @@ export default function App() {
                         <button 
                           type="button"
                           onClick={() => runSimulation(selectedTestCase.id)}
-                          disabled={isRunningSimulation || selectedTestCase.status === 'Running'}
+                          disabled={isRunningSimulation || normalizeExecutionStatus(selectedTestCase.status) === 'RUNNING'}
                           className={`flex-1 py-3 rounded-xl font-bold text-xs uppercase flex items-center justify-center gap-2 transition-all ${
-                            isRunningSimulation || selectedTestCase.status === 'Running'
+                            isRunningSimulation || normalizeExecutionStatus(selectedTestCase.status) === 'RUNNING'
                               ? 'bg-white/5 text-muted cursor-not-allowed'
                               : 'bg-accent text-white hover:bg-[#4433EE] shadow-lg shadow-accent/20'
                           }`}
@@ -2841,11 +3662,11 @@ export default function App() {
                       <div className="text-[10px] text-muted uppercase font-bold mb-1">当前状态</div>
                       <div className="flex items-center gap-2">
                         <div className={`w-2 h-2 rounded-full ${
-                          selectedTestCase.status === 'Passed' ? 'bg-success' :
-                          selectedTestCase.status === 'Failed' ? 'bg-danger' :
-                          selectedTestCase.status === 'Running' ? 'bg-accent' : 'bg-warning'
+                          normalizeTestResult(selectedTestCase.status) === 'PASSED' ? 'bg-success' :
+                          normalizeTestResult(selectedTestCase.status) === 'FAILED' || normalizeTestResult(selectedTestCase.status) === 'ERROR' ? 'bg-danger' :
+                          normalizeExecutionStatus(selectedTestCase.status) === 'RUNNING' ? 'bg-accent' : 'bg-warning'
                         }`} />
-                        <span className="font-bold text-sm">{selectedTestCase.status}</span>
+                        <span className="font-bold text-sm">{normalizeTestResult(selectedTestCase.status) || getExecutionStatusLabel(selectedTestCase.status)}</span>
                       </div>
                     </div>
                     <div className="p-4 rounded-xl bg-white/2 border border-border">
@@ -2858,16 +3679,22 @@ export default function App() {
                         <div className="font-bold text-sm">{selectedTestCase.automation_level || 'B'}</div>
                       )}
                     </div>
-                    <div className="p-4 rounded-xl bg-white/2 border border-border">
-                      <div className="text-[10px] text-muted uppercase font-bold mb-1">
-                        {showEditModal ? '测试工具' : '测试工具'}
+                      <div className="p-4 rounded-xl bg-white/2 border border-border">
+                        <div className="text-[10px] text-muted uppercase font-bold mb-1">
+                          {showEditModal ? '测试工具' : '测试工具'}
+                        </div>
+                        {showEditModal ? (
+                          <input
+                            name="test_tool"
+                            value={editTestTool}
+                            onChange={(e) => setEditTestTool(e.target.value)}
+                            type="text"
+                            className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent"
+                          />
+                        ) : (
+                          <div className="font-bold text-sm font-mono text-accent">{selectedTestCase.test_tool || '-'}</div>
+                        )}
                       </div>
-                      {showEditModal ? (
-                        <input name="test_tool" defaultValue={selectedTestCase.test_tool} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" />
-                      ) : (
-                        <div className="font-bold text-sm font-mono text-accent">{selectedTestCase.test_tool || '-'}</div>
-                      )}
-                    </div>
                     <div className="p-4 rounded-xl bg-white/2 border border-border">
                       <div className="text-[10px] text-muted uppercase font-bold mb-1">测试类型</div>
                       {showEditModal ? (
@@ -2974,48 +3801,105 @@ export default function App() {
                         )}
                       </div>
                       <div className="p-4 rounded-xl bg-white/2 border border-border col-span-2">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-1">命令/脚本</div>
+                        <div className="text-[10px] text-muted uppercase font-bold mb-1">脚本路径</div>
                         {showEditModal ? (
-                          <div className="space-y-3">
-                            <input name="script_path" defaultValue={selectedTestCase.script_path || ''} type="text" placeholder="脚本路径" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" />
-                            <input name="command_template" defaultValue={selectedTestCase.command_template || ''} type="text" placeholder="命令模板" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent" />
-                          </div>
+                          <input
+                            name="script_path"
+                            value={editScriptPath}
+                            onChange={(e) => setEditScriptPath(e.target.value)}
+                            type="text"
+                            placeholder="脚本路径，例如 scripts/ssh_access_check.py"
+                            className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent"
+                          />
                         ) : (
-                          <div className="font-mono text-sm break-all">{selectedTestCase.command_template || selectedTestCase.script_path || '-'}</div>
-                        )}
-                      </div>
-                      <div className="p-4 rounded-xl bg-white/2 border border-border col-span-2">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-1">参数模板</div>
-                        {showEditModal ? (
-                          <textarea name="args_template" defaultValue={selectedTestCase.args_template || ''} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono min-h-20 focus:outline-none focus:border-accent" />
-                        ) : (
-                          <div className="font-mono text-sm break-all">{selectedTestCase.args_template || '-'}</div>
+                          <div className="font-mono text-sm break-all">{selectedTestCase.script_path || '-'}</div>
                         )}
                       </div>
                     </div>
                   </div>
 
-                  <div className="space-y-4">
-                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">测试步骤</h4>
+                  <div className="space-y-3">
+                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">执行输入需求</h4>
                     {showEditModal ? (
-                      <textarea name="steps" defaultValue={JSON.parse(selectedTestCase.steps || '[]').join('\n')} className="w-full bg-bg border border-border rounded-xl px-4 py-3 text-sm font-mono min-h-40 focus:outline-none focus:border-accent" />
+                      <div className="space-y-2">
+                        {editRequiredInputs.length === 0 ? (
+                          <div className="text-xs text-muted italic">脚本尚未识别出输入字段，请检查脚本路径或测试工具命名。</div>
+                        ) : (
+                          (() => {
+                            const defaults = parseDefaultRuntimeInputs(selectedTestCase.default_runtime_inputs);
+                            return editRequiredInputs.map((inputKey) => {
+                              const option = REQUIRED_INPUT_OPTIONS.find((item) => item.value === inputKey);
+                              return (
+                                <div key={inputKey} className="rounded-xl bg-white/2 border border-border px-4 py-3 space-y-3">
+                                  <div>
+                                    <div className="text-xs font-bold">{option?.label || inputKey}</div>
+                                    <div className="text-[10px] text-muted mt-1">{option?.description || '运行时由任务上下文提供。'}</div>
+                                  </div>
+                                  {inputKey !== 'connection_address' && (
+                                    <div className="space-y-1">
+                                      <div className="text-[10px] uppercase font-bold text-muted">默认值</div>
+                                      <input
+                                        name={`default_input_${inputKey}`}
+                                        type={inputKey.toLowerCase().includes('password') ? 'password' : inputKey.endsWith('_port') ? 'number' : 'text'}
+                                        min={inputKey.endsWith('_port') ? 1 : undefined}
+                                        defaultValue={defaults[inputKey] || DEFAULT_RUNTIME_INPUT_SUGGESTIONS[inputKey] || ''}
+                                        className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
+                                        placeholder={option?.description || '任务发起时作为默认值自动带出'}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            });
+                          })()
+                        )}
+                      </div>
                     ) : (
                       <div className="space-y-2">
                         {(() => {
-                          try {
-                            const steps = JSON.parse(selectedTestCase.steps || '[]');
-                            return steps.map((step: string, index: number) => (
-                              <div key={index} className="flex gap-3 items-start p-3 rounded-xl bg-white/2 border border-border">
-                                <div className="w-5 h-5 rounded-full bg-accent/20 text-accent flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
-                                  {index + 1}
-                                </div>
-                                <span className="text-sm text-text-secondary">{step}</span>
-                              </div>
-                            ));
-                          } catch (e) {
-                            return <div className="text-xs text-muted italic">无法解析测试步骤</div>;
+                          const defaults = parseDefaultRuntimeInputs(selectedTestCase.default_runtime_inputs);
+                          const currentInputs = resolveRuntimeInputs(selectedTestCase.script_path, selectedTestCase.test_tool, selectedTestCase.required_inputs);
+                          if (currentInputs.length === 0) {
+                            return <div className="text-xs text-muted italic">未声明额外运行时输入</div>;
                           }
+                          return currentInputs.map((inputKey) => {
+                            const option = REQUIRED_INPUT_OPTIONS.find((item) => item.value === inputKey);
+                            const defaultValue = defaults[inputKey];
+                            return (
+                              <div key={inputKey} className="rounded-xl bg-white/2 border border-border px-4 py-3">
+                                <div className="text-xs font-bold">{option?.label || inputKey}</div>
+                                <div className="text-[10px] text-muted mt-1">{option?.description || '运行时由任务上下文提供。'}</div>
+                                {inputKey !== 'connection_address' && defaultValue && (
+                                  <div className="text-[10px] mt-2 text-text-secondary">
+                                    默认值: <span className="font-mono">{defaultValue}</span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          });
                         })()}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-4">
+                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">测试步骤</h4>
+                    {showEditModal ? (
+                      <textarea name="steps" defaultValue={parseCaseSteps(selectedTestCase.steps).join('\n')} className="w-full bg-bg border border-border rounded-xl px-4 py-3 text-sm font-mono min-h-40 focus:outline-none focus:border-accent" />
+                    ) : (
+                      <div className="space-y-2">
+                        {parseCaseSteps(selectedTestCase.steps).length === 0 ? (
+                          <div className="text-xs text-muted italic">未配置测试步骤</div>
+                        ) : (
+                          parseCaseSteps(selectedTestCase.steps).map((step: string, index: number) => (
+                            <div key={index} className="flex gap-3 items-start p-3 rounded-xl bg-white/2 border border-border">
+                              <div className="w-5 h-5 rounded-full bg-accent/20 text-accent flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
+                                {index + 1}
+                              </div>
+                              <span className="text-sm text-text-secondary">{step}</span>
+                            </div>
+                          ))
+                        )}
                       </div>
                     )}
                   </div>
@@ -3035,10 +3919,11 @@ export default function App() {
                           <div key={run.id} className="p-4 rounded-xl border border-border bg-white/2 hover:bg-white/5 transition-colors group">
                             <div className="flex justify-between items-start mb-2">
                               <div className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                                run.result === 'Passed' ? 'bg-success/20 text-success' :
-                                run.result === 'Failed' ? 'bg-danger/20 text-danger' : 'bg-warning/20 text-warning'
+                                normalizeTestResult(run.result) === 'PASSED' ? 'bg-success/20 text-success' :
+                                normalizeTestResult(run.result) === 'FAILED' || normalizeTestResult(run.result) === 'ERROR' ? 'bg-danger/20 text-danger' :
+                                'bg-warning/20 text-warning'
                               }`}>
-                                {run.result}
+                                {normalizeTestResult(run.result) || run.result}
                               </div>
                               <span className="text-[10px] text-muted font-mono">{formatServerDateTime(run.executed_at)}</span>
                             </div>
@@ -3048,15 +3933,22 @@ export default function App() {
                             {parseStepResults(run.step_results).length > 0 && (
                               <div className="mt-3 space-y-2">
                                 {parseStepResults(run.step_results).map((step, index) => (
-                                  <div key={`${run.id}-${index}`} className="flex items-start justify-between gap-3 rounded-lg border border-border bg-white/2 px-3 py-2">
-                                    <div className="text-[11px] text-text-secondary">{step.name}</div>
-                                    <span className={`text-[10px] font-bold uppercase ${
-                                      step.result === 'Passed' ? 'text-success' :
-                                      step.result === 'Failed' ? 'text-danger' :
-                                      step.result === 'Blocked' ? 'text-warning' : 'text-muted'
-                                    }`}>
-                                      {step.result}
-                                    </span>
+                                  <div key={`${run.id}-${index}`} className="rounded-lg border border-border bg-white/2 px-3 py-3 space-y-1.5">
+                                    <div className="flex items-center justify-between gap-3">
+                                      <div className="min-w-0 text-sm text-text-primary">
+                                        <span className="font-semibold">{step.name}</span>
+                                        {step.command ? <span className="text-text-secondary">：<span className="font-mono break-all">{step.command}</span></span> : null}
+                                      </div>
+                                      <span className={`text-[10px] font-bold uppercase ${getStepExecutionBadge(step).className}`}>
+                                        {getStepExecutionBadge(step).label}
+                                      </span>
+                                    </div>
+                                    {step.output ? (
+                                      <div className="text-[11px] text-text-secondary">输出: <span className="font-mono break-all">{step.output}</span></div>
+                                    ) : null}
+                                    {step.security_assessment ? (
+                                      <div className="text-[11px] text-text-secondary">结论: {step.security_assessment}</div>
+                                    ) : null}
                                   </div>
                                 ))}
                               </div>

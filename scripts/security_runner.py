@@ -20,13 +20,13 @@ def assess_case(payload: dict) -> dict:
     signature = " ".join([title.lower(), description.lower(), test_input.lower()])
 
     risk_keywords = {
-        "ssh": ("Failed", "发现未授权 SSH 入口，默认策略未完全封堵。"),
-        "firewall": ("Passed", "防火墙规则命中预期，未发现异常放行。"),
-        "dos": ("Failed", "压力场景下出现资源耗尽迹象，需要限流或隔离。"),
-        "ota": ("Passed", "升级包签名与完整性校验符合预期。"),
-        "bluetooth": ("Blocked", "蓝牙安全场景需要外部射频环境支持，当前环境不足。"),
-        "penetration": ("Failed", "渗透模拟发现可疑攻击面，需要进一步加固。"),
-        "dtc": ("Passed", "诊断访问权限控制正常，未发现越权读取。"),
+        "ssh": ("FAILED", "发现未授权 SSH 入口，默认策略未完全封堵。"),
+        "firewall": ("PASSED", "防火墙规则命中预期，未发现异常放行。"),
+        "dos": ("FAILED", "压力场景下出现资源耗尽迹象，需要限流或隔离。"),
+        "ota": ("PASSED", "升级包签名与完整性校验符合预期。"),
+        "bluetooth": ("BLOCKED", "蓝牙安全场景需要外部射频环境支持，当前环境不足。"),
+        "penetration": ("FAILED", "渗透模拟发现可疑攻击面，需要进一步加固。"),
+        "dtc": ("PASSED", "诊断访问权限控制正常，未发现越权读取。"),
     }
 
     for keyword, (result, reason) in risk_keywords.items():
@@ -38,11 +38,11 @@ def assess_case(payload: dict) -> dict:
                 "category": category,
             }
 
-    result = random.choices(["Passed", "Failed", "Blocked"], weights=[0.6, 0.25, 0.15], k=1)[0]
+    result = random.choices(["PASSED", "FAILED", "BLOCKED"], weights=[0.6, 0.25, 0.15], k=1)[0]
     default_reason = {
-        "Passed": "规则校验与访问控制检查通过。",
-        "Failed": "检测到潜在策略缺口，需要复核安全基线。",
-        "Blocked": "缺少必要测试前置条件，暂时阻塞。",
+        "PASSED": "规则校验与访问控制检查通过。",
+        "FAILED": "检测到潜在策略缺口，需要复核安全基线。",
+        "BLOCKED": "缺少必要测试前置条件，暂时阻塞。",
     }[result]
     return {
         "result": result,
@@ -54,7 +54,7 @@ def assess_case(payload: dict) -> dict:
 
 def main() -> int:
     if len(sys.argv) != 2:
-        print(json.dumps({"result": "Blocked", "duration": 0, "logs": "Missing payload file"}))
+        print(json.dumps({"result": "BLOCKED", "duration": 0, "logs": "Missing payload file"}))
         return 1
 
     payload_path = Path(sys.argv[1])
@@ -75,8 +75,8 @@ def main() -> int:
     log(f"[SECURITY] Assessment: {assessment['reason']}")
 
     step_results = [
-        {"name": "装载测试用例与环境检查", "result": "Passed", "logs": "用例载入完成，基础运行环境可用。", "duration": 1},
-        {"name": "策略与攻击面扫描", "result": "Passed" if assessment["result"] != "Blocked" else "Blocked", "logs": f"Protocol={assessment['protocol']} Category={assessment['category']}", "duration": 1},
+        {"name": "装载测试用例与环境检查", "result": "PASSED", "logs": "用例载入完成，基础运行环境可用。", "duration": 1},
+        {"name": "策略与攻击面扫描", "result": "PASSED" if assessment["result"] != "BLOCKED" else "BLOCKED", "logs": f"Protocol={assessment['protocol']} Category={assessment['category']}", "duration": 1},
         {"name": "安全结论判定", "result": assessment["result"], "logs": assessment["reason"], "duration": 1},
     ]
 
@@ -88,7 +88,7 @@ def main() -> int:
         "steps": step_results,
     }
     print(json.dumps(result_payload), flush=True)
-    return 0 if assessment["result"] == "Passed" else 1
+    return 0 if assessment["result"] == "PASSED" else 1
 
 
 if __name__ == "__main__":

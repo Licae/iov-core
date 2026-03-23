@@ -1,4 +1,35 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { apiClient } from './api/client';
+import { useAppMutations, useBootstrapData, useRefreshExecutionData } from './api/queries';
+import { useAssetsView } from './modules/assets/use-assets-view';
+import { AssetsPage } from './modules/assets/assets-page';
+import { useManagementFilters } from './modules/management/use-management-filters';
+import { ManagementPage } from './modules/management/management-page';
+import { RequirementsPage } from './modules/requirements/requirements-page';
+import { useSuitesView } from './modules/suites/use-suites-view';
+import { SuitesPage } from './modules/suites/suites-page';
+import { TaraPage } from './modules/tara/tara-page';
+import { useTaskDetail } from './modules/task-detail/use-task-detail';
+import { TaskDetailModal } from './modules/task-detail/task-detail-modal';
+import { useTaskLaunch } from './modules/task-launch/use-task-launch';
+import { TaskLaunchModal } from './modules/task-launch/task-launch-modal';
+import type { LucideIcon } from 'lucide-react';
+import type {
+  Asset,
+  CanonicalTestResult,
+  Defect,
+  ExecutionStatus,
+  ExecutionTask,
+  ExecutionTaskDetail,
+  FailureCategory,
+  RecentRun,
+  Stats,
+  StepExecutionResult,
+  SuiteRun,
+  TestCase,
+  TestRun,
+  TestSuite,
+} from './api/types';
 import { 
   LayoutDashboard, 
   PlayCircle, 
@@ -24,7 +55,6 @@ import {
   Clock,
   Sun,
   Moon,
-  Terminal as TerminalIcon,
   BrainCircuit,
   Trash2,
   Edit3
@@ -32,8 +62,6 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import {
   ResponsiveContainer, 
-  LineChart, 
-  Line, 
   XAxis, 
   YAxis, 
   Tooltip, 
@@ -42,174 +70,10 @@ import {
   Area
 } from 'recharts';
 
-// --- Types ---
-interface TestCase {
-  id: number;
-  title: string;
-  category: string;
-  type: 'Automated' | 'Manual';
-  protocol: string;
-  description: string;
-  test_input?: string;
-  test_tool?: string;
-  expected_result?: string;
-  automation_level?: string;
-  executor_type?: string;
-  script_path?: string;
-  command_template?: string;
-  args_template?: string;
-  timeout_sec?: number;
-  required_inputs?: string;
-  default_runtime_inputs?: string;
-  status: string;
-  created_at: string;
-  steps?: string; // JSON string
-}
-
-interface TestRun {
-  id: number;
-  test_case_id: number;
-  result: string;
-  logs: string;
-  summary?: string;
-  step_results?: string;
-  duration: number;
-  executed_by: string;
-  executed_at: string;
-}
-
-interface StepExecutionResult {
-  name: string;
-  result: string;
-  logs?: string;
-  duration?: number;
-  command?: string;
-  command_result?: string;
-  output?: string;
-  security_assessment?: string;
-  exit_code?: number | null;
-  stdout?: string;
-  stderr?: string;
-  timestamp?: string;
-  conclusion?: string;
-}
-
-interface RecentRun {
-  id: number;
-  test_case_id: number;
-  result: string;
-  logs: string;
-  duration: number;
-  executed_by: string;
-  executed_at: string;
-  test_case_title: string;
-  category: string;
-  protocol: string;
-  test_case_status: string;
-  task_id?: number | null;
-  task_type?: string | null;
-  task_status?: string | null;
-  asset_name?: string | null;
-}
-
-interface Stats {
-  total: number;
-  automated: number;
-  manual: number;
-  results: { result: string; count: number }[];
-}
-
-interface TestSuite {
-  id: number;
-  name: string;
-  description: string;
-  created_at: string;
-  case_count: number;
-}
-
-interface SuiteRun {
-  id: number;
-  suite_id: number;
-  suite_name: string;
-  status: string;
-  total_cases: number;
-  completed_cases: number;
-  passed_cases: number;
-  failed_cases: number;
-  blocked_cases: number;
-  current_case_id?: number | null;
-  current_case_title?: string | null;
-  started_at: string;
-  finished_at?: string | null;
-}
-
-interface ExecutionTask {
-  id: number;
-  type: 'single' | 'suite';
-  status: string;
-  asset_id?: number | null;
-  asset_name?: string | null;
-  suite_id?: number | null;
-  suite_name?: string | null;
-  test_case_id?: number | null;
-  test_case_title?: string | null;
-  total_items: number;
-  completed_items: number;
-  passed_items: number;
-  failed_items: number;
-  blocked_items: number;
-  current_test_case_id?: number | null;
-  current_case_title?: string | null;
-  current_item_label?: string | null;
-  started_at: string;
-  finished_at?: string | null;
-  stop_on_failure?: number;
-  error_message?: string | null;
-  executor?: string | null;
-  retry_count?: number;
-  source_task_id?: number | null;
-  runtime_inputs?: string | null;
-  failure_category?: 'NONE' | 'ENVIRONMENT' | 'PERMISSION' | 'SCRIPT' | string | null;
-  can_retry?: boolean;
-  retry_block_reason?: string | null;
-}
-
-interface ExecutionTaskDetailItem {
-  id: number;
-  task_id: number;
-  test_case_id: number;
-  sort_order: number;
-  status: string;
-  result?: string | null;
-  failure_category?: string | null;
-  run_id?: number | null;
-  started_at?: string | null;
-  finished_at?: string | null;
-  title: string;
-  category?: string | null;
-  protocol?: string | null;
-  test_tool?: string | null;
-  test_input?: string | null;
-  expected_result?: string | null;
-  run_result?: string | null;
-  logs?: string | null;
-  summary?: string | null;
-  step_results?: string | null;
-  duration?: number | null;
-  executed_at?: string | null;
-}
-
-interface ExecutionTaskDetail {
-  task: ExecutionTask;
-  items: ExecutionTaskDetailItem[];
-}
-
-type ExecutionStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'CANCELLED';
-type CanonicalTestResult = 'PASSED' | 'FAILED' | 'BLOCKED' | 'ERROR';
-type FailureCategory = 'NONE' | 'ENVIRONMENT' | 'PERMISSION' | 'SCRIPT';
 const SECURITY_BASELINE_SUITE_NAME = '系统安全基线套件';
 
 const CASE_CATEGORY_OPTIONS = ['IVI', 'T-Box', 'Gateway', 'ADAS', 'BMS', 'OTA', '整车', '云控平台', '移动端', 'CAN总线'];
+const SECURITY_DOMAIN_OPTIONS = ['访问控制', '身份认证', '口令策略', '日志安全', '配置加固', '数据保护', '网络暴露', 'OTA安全', '供应链安全', '未分类'];
 const REQUIRED_INPUT_OPTIONS = [
   { value: 'connection_address', label: '连接地址', description: '从测试资产自动带入 IP/主机名。' },
   { value: 'ssh_probe_username', label: 'SSH 测试账号', description: '任务发起时填写用于尝试登录的测试用户名。' },
@@ -348,7 +212,7 @@ interface ToastProps {
   message: string;
   type: 'success' | 'error';
   onClose: () => void;
-  key?: any;
+  key?: React.Key;
 }
 
 const Toast = ({ message, type, onClose }: ToastProps) => (
@@ -368,7 +232,7 @@ const Toast = ({ message, type, onClose }: ToastProps) => (
   </motion.div>
 );
 
-const SidebarItem = ({ icon: Icon, label, active, badge, onClick }: { icon: any, label: string, active?: boolean, badge?: string, onClick: () => void }) => (
+const SidebarItem = ({ icon: Icon, label, active, badge, onClick }: { icon: LucideIcon, label: string, active?: boolean, badge?: string, onClick: () => void }) => (
   <button 
     onClick={onClick}
     className={`w-full flex items-center justify-between px-6 py-3 text-sm transition-all relative ${
@@ -388,7 +252,7 @@ const SidebarItem = ({ icon: Icon, label, active, badge, onClick }: { icon: any,
   </button>
 );
 
-const StatCard = ({ label, value, trend, footnote, icon: Icon, color }: { label: string, value: string | number, trend?: string, footnote?: string, icon: any, color: string }) => (
+const StatCard = ({ label, value, trend, footnote, icon: Icon, color }: { label: string, value: string | number, trend?: string, footnote?: string, icon: LucideIcon, color: string }) => (
   <div className="glass-card p-6 flex-1 min-w-[240px]">
     <div className="flex justify-between items-start mb-4">
       <div className="flex items-center gap-2">
@@ -410,15 +274,58 @@ const StatCard = ({ label, value, trend, footnote, icon: Icon, color }: { label:
 );
 
 export default function App() {
-  const [view, setView] = useState<'dashboard' | 'running' | 'defects' | 'assets' | 'reports' | 'management' | 'suites'>('dashboard');
-  const [testCases, setTestCases] = useState<TestCase[]>([]);
-  const [testSuites, setTestSuites] = useState<TestSuite[]>([]);
-  const [suiteRuns, setSuiteRuns] = useState<SuiteRun[]>([]);
-  const [executionTasks, setExecutionTasks] = useState<ExecutionTask[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<'dashboard' | 'running' | 'defects' | 'assets' | 'reports' | 'management' | 'suites' | 'requirements' | 'tara'>('dashboard');
+  const bootstrapData = useBootstrapData();
+  const refreshExecutionData = useRefreshExecutionData();
+  const mutations = useAppMutations();
+  const testCases = bootstrapData.testCases;
+  const testSuites = bootstrapData.testSuites;
+  const suiteRuns = bootstrapData.suiteRuns;
+  const executionTasks = bootstrapData.executionTasks;
+  const stats = bootstrapData.stats;
+  const trendData = bootstrapData.trendData;
+  const coverageData = bootstrapData.coverageData;
+  const defects = bootstrapData.defects;
+  const assets = bootstrapData.assets;
+  const settings = bootstrapData.settings;
+  const requirements = bootstrapData.requirements;
+  const requirementCoverage = bootstrapData.requirementCoverage;
+  const taraItems = bootstrapData.taraItems;
+  const recentRuns = bootstrapData.recentRuns;
+  const {
+    runTestCase: runTestCaseMutation,
+    runSuite: runSuiteMutation,
+    runCases: runCasesMutation,
+    cancelTask: cancelTaskMutation,
+    retryTask: retryTaskMutation,
+    createCase: createCaseMutation,
+    updateCase: updateCaseMutation,
+    deleteCase: deleteCaseMutation,
+    importCases: importCasesMutation,
+    updateCaseStatus: updateCaseStatusMutation,
+    createRequirement: createRequirementMutation,
+    updateRequirement: updateRequirementMutation,
+    deleteRequirement: deleteRequirementMutation,
+    updateRequirementLinks: updateRequirementLinksMutation,
+    updateRequirementAssets: updateRequirementAssetsMutation,
+    createTaraItem: createTaraItemMutation,
+    updateTaraItem: updateTaraItemMutation,
+    deleteTaraItem: deleteTaraItemMutation,
+    updateTaraLinks: updateTaraLinksMutation,
+    createSuite: createSuiteMutation,
+    deleteSuite: deleteSuiteMutation,
+    createAsset: createAssetMutation,
+    updateAsset: updateAssetMutation,
+    deleteAsset: deleteAssetMutation,
+    pingAsset: pingAssetMutation,
+    analyzeDefect: analyzeDefectMutation,
+    updateSetting: updateSettingMutation,
+  } = mutations;
   const [searchQuery, setSearchQuery] = useState('');
   const [managementSearchQuery, setManagementSearchQuery] = useState('');
+  const [managementCategoryFilter, setManagementCategoryFilter] = useState<string>('All');
+  const [managementSecurityDomainFilter, setManagementSecurityDomainFilter] = useState<string>('All');
+  const [managementAutomationFilter, setManagementAutomationFilter] = useState<string>('All');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showAssetModal, setShowAssetModal] = useState(false);
@@ -440,33 +347,25 @@ export default function App() {
   const [updatingIds, setUpdatingIds] = useState<number[]>([]);
   const [toasts, setToasts] = useState<{ id: string, message: string, type: 'success' | 'error' }[]>([]);
   const [selectedTestCase, setSelectedTestCase] = useState<TestCase | null>(null);
-  const [selectedAsset, setSelectedAsset] = useState<any | null>(null);
+  const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [selectedTaskDetail, setSelectedTaskDetail] = useState<ExecutionTaskDetail | null>(null);
   const [isTaskDetailLoading, setIsTaskDetailLoading] = useState(false);
   const [pingingAssetId, setPingingAssetId] = useState<number | null>(null);
   const [history, setHistory] = useState<TestRun[]>([]);
-  const [recentRuns, setRecentRuns] = useState<RecentRun[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [isRunningSimulation, setIsRunningSimulation] = useState(false);
-  const [simulationLogs, setSimulationLogs] = useState<any[]>([]);
+  const [simulationLogs, setSimulationLogs] = useState<Array<{ timestamp: string; message: string; testCaseId?: number }>>([]);
   const [analyzingDefectId, setAnalyzingDefectId] = useState<string | null>(null);
   const [isUpdatingAsset, setIsUpdatingAsset] = useState(false);
   const [defectAnalysis, setDefectAnalysis] = useState<Record<string, string>>({});
   const [filterProtocol, setFilterProtocol] = useState<string>('All');
-  const [trendData, setTrendData] = useState<any[]>([]);
-  const [coverageData, setCoverageData] = useState<any[]>([]);
-  const [defects, setDefects] = useState<any[]>([]);
-  const [assets, setAssets] = useState<any[]>([]);
-  const [settings, setSettings] = useState<{ [key: string]: boolean }>({
-    abort_on_critical_dtc: true,
-    pr_requires_sil: true
-  });
-  const [runningSuiteIds, setRunningSuiteIds] = useState<number[]>([]);
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [createScriptPath, setCreateScriptPath] = useState('');
   const [createTestTool, setCreateTestTool] = useState('');
   const [editScriptPath, setEditScriptPath] = useState('');
   const [editTestTool, setEditTestTool] = useState('');
+  const [deleteTestCaseCandidate, setDeleteTestCaseCandidate] = useState<{ id: number; title: string } | null>(null);
+  const [isDeletingTestCase, setIsDeletingTestCase] = useState(false);
 
   const filteredTestCases = testCases.filter(tc => {
     const matchesSearch = tc.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
@@ -474,18 +373,16 @@ export default function App() {
     const matchesProtocol = filterProtocol === 'All' || tc.protocol === filterProtocol;
     return matchesSearch && matchesProtocol;
   });
-  const managementFilteredTestCases = useMemo(
-    () =>
-      testCases
-        .filter(
-          (tc) =>
-            tc.title.toLowerCase().includes(managementSearchQuery.toLowerCase()) ||
-            tc.category.toLowerCase().includes(managementSearchQuery.toLowerCase()) ||
-            (tc.test_tool && tc.test_tool.toLowerCase().includes(managementSearchQuery.toLowerCase()))
-        )
-        .sort((a, b) => a.id - b.id),
-    [testCases, managementSearchQuery]
-  );
+  const {
+    managementCategoryOptions,
+    managementSecurityDomainOptions,
+    managementFilteredTestCases,
+  } = useManagementFilters(testCases, {
+    searchQuery: managementSearchQuery,
+    categoryFilter: managementCategoryFilter,
+    securityDomainFilter: managementSecurityDomainFilter,
+    automationFilter: managementAutomationFilter,
+  });
 
   const parseRequiredInputs = (value?: string | null) => {
     if (!value) return [] as string[];
@@ -534,11 +431,32 @@ export default function App() {
     return parseRequiredInputs(fallback);
   };
 
-  const selectedLaunchTestCases = testCases.filter(tc => selectedCaseIds.includes(tc.id));
-  const selectedLaunchSuite = testSuites.find((suite) => String(suite.id) === String(selectedSuiteId));
-  const selectedBaselineSuite = testSuites.find((suite) => suite.name === SECURITY_BASELINE_SUITE_NAME) || null;
-  const selectedLaunchAsset = assets.find((asset: any) => String(asset.id) === String(selectedAssetId));
-  const onlineAssets = assets.filter((asset: any) => asset.status === 'Online');
+  const {
+    selectedLaunchTestCases,
+    selectedLaunchSuite,
+    selectedBaselineSuite,
+    selectedLaunchAsset,
+    onlineAssets,
+    selectedLaunchRequiredInputs,
+    selectedLaunchDefaultInputs,
+    selectedLaunchInputConflicts,
+    selectedAssetSummary,
+    selectedCaseSummary,
+    selectedSuiteSummary,
+  } = useTaskLaunch({
+    testCases,
+    testSuites,
+    assets,
+    selectedCaseIds,
+    selectedSuiteId,
+    selectedAssetId,
+    baselineSuiteName: SECURITY_BASELINE_SUITE_NAME,
+    resolveRuntimeInputs,
+    parseDefaultRuntimeInputs,
+    defaultRuntimeInputSuggestions: DEFAULT_RUNTIME_INPUT_SUGGESTIONS,
+  });
+  const { runningSuiteIds } = useSuitesView(suiteRuns, normalizeExecutionStatus);
+  const { assetSummary } = useAssetsView(assets);
   const createRequiredInputs = useMemo(
     () => resolveRuntimeInputs(createScriptPath, createTestTool, null),
     [createScriptPath, createTestTool]
@@ -547,54 +465,7 @@ export default function App() {
     () => resolveRuntimeInputs(editScriptPath, editTestTool, selectedTestCase?.required_inputs),
     [editScriptPath, editTestTool, selectedTestCase?.required_inputs]
   );
-  const selectedLaunchRequiredInputs: string[] = Array.from(new Set(
-    selectedLaunchTestCases.flatMap((testCase) => resolveRuntimeInputs(testCase.script_path, testCase.test_tool, testCase.required_inputs))
-  )) as string[];
-  const { selectedLaunchDefaultInputs, selectedLaunchInputConflicts } = useMemo(() => {
-    const merged: Record<string, string> = {};
-    const conflicts = new Set<string>();
-
-    selectedLaunchTestCases.forEach((testCase) => {
-      const defaults = parseDefaultRuntimeInputs(testCase.default_runtime_inputs);
-      resolveRuntimeInputs(testCase.script_path, testCase.test_tool, testCase.required_inputs).forEach((inputKey) => {
-        if (inputKey === 'connection_address') return;
-        const suggestedValue = defaults[inputKey];
-        if (!suggestedValue) return;
-        if (!(inputKey in merged)) {
-          merged[inputKey] = suggestedValue;
-          return;
-        }
-        if (merged[inputKey] !== suggestedValue) {
-          merged[inputKey] = '';
-          conflicts.add(inputKey);
-        }
-      });
-    });
-
-    selectedLaunchRequiredInputs.forEach((inputKey) => {
-      if (inputKey === 'connection_address') return;
-      if (!(inputKey in merged) || merged[inputKey] === '') {
-        const suggested = DEFAULT_RUNTIME_INPUT_SUGGESTIONS[inputKey];
-        if (suggested && !conflicts.has(inputKey)) {
-          merged[inputKey] = suggested;
-        }
-      }
-    });
-
-    return {
-      selectedLaunchDefaultInputs: merged,
-      selectedLaunchInputConflicts: Array.from(conflicts),
-    };
-  }, [selectedLaunchTestCases, selectedLaunchRequiredInputs]);
-  const selectedAssetSummary = selectedLaunchAsset
-    ? `${selectedLaunchAsset.name} · ${selectedLaunchAsset.connection_address || '未配置连接地址'}`
-    : '请选择一个在线资产';
-  const selectedCaseSummary = selectedLaunchTestCases.length === 0
-    ? '请选择一个或多个测试用例'
-    : selectedLaunchTestCases.map((testCase) => testCase.title).join('、');
-  const selectedSuiteSummary = selectedLaunchSuite
-    ? `${selectedLaunchSuite.name}（${selectedLaunchSuite.case_count} 条）`
-    : '请选择一个测试套件';
+  const taskDetailView = useTaskDetail(selectedTaskDetail);
 
   useEffect(() => {
     if (!showCreateModal) {
@@ -660,8 +531,6 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    fetchData();
-
     // Setup WebSocket
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${protocol}//${window.location.host}`);
@@ -673,14 +542,14 @@ export default function App() {
           setSimulationLogs(prev => [...prev, data].slice(-10));
         }
       } else if (data.type === 'SIMULATION_COMPLETE') {
-        fetchData();
+        refreshExecutionData();
         if (selectedTestCase?.id === data.testCaseId) {
           fetchHistory(data.testCaseId);
           setIsRunningSimulation(false);
           setSelectedTestCase(prev => prev ? { ...prev, status: data.result } : null);
         }
       } else if (data.type === 'EXECUTION_TASK_UPDATED' || data.type === 'EXECUTION_TASK_COMPLETED') {
-        fetchData();
+        refreshExecutionData();
         if (selectedTaskDetail?.task.id && data.task?.id === selectedTaskDetail.task.id) {
           fetchTaskDetail(selectedTaskDetail.task.id, false);
         }
@@ -691,52 +560,7 @@ export default function App() {
     };
 
     return () => ws.close();
-  }, [selectedTestCase?.id, selectedTaskDetail?.task.id]);
-
-  const fetchData = async () => {
-    try {
-      const [casesRes, statsRes, trendRes, coverageRes, defectsRes, assetsRes, settingsRes, suitesRes, suiteRunsRes, tasksRes, recentRunsRes] = await Promise.all([
-        fetch('/api/test-cases'),
-        fetch('/api/stats'),
-        fetch('/api/stats/trend'),
-        fetch('/api/stats/coverage'),
-        fetch('/api/defects'),
-        fetch('/api/assets'),
-        fetch('/api/settings'),
-        fetch('/api/test-suites'),
-        fetch('/api/suite-runs'),
-        fetch('/api/tasks'),
-        fetch('/api/dashboard/recent-runs')
-      ]);
-      const cases = await casesRes.json();
-      const statsData = await statsRes.json();
-      const trend = await trendRes.json();
-      const coverage = await coverageRes.json();
-      const defectsData = await defectsRes.json();
-      const assetsData = await assetsRes.json();
-      const settingsData = await settingsRes.json();
-      const suitesData = await suitesRes.json();
-      const suiteRunsData = await suiteRunsRes.json();
-      const tasksData = await tasksRes.json();
-      const recentRunsData = await recentRunsRes.json();
-      setTestCases(cases);
-      setStats(statsData);
-      setTrendData(trend);
-      setCoverageData(coverage);
-      setDefects(defectsData);
-      setAssets(assetsData);
-      setSettings(settingsData);
-      setTestSuites(suitesData);
-      setSuiteRuns(suiteRunsData);
-      setExecutionTasks(tasksData);
-      setRecentRuns(recentRunsData);
-      setRunningSuiteIds(suiteRunsData.filter((run: SuiteRun) => isExecutionActive(run.status)).map((run: SuiteRun) => run.suite_id));
-    } catch (error) {
-      console.error('Failed to fetch data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [refreshExecutionData, selectedTestCase?.id, selectedTaskDetail?.task.id]);
 
   const formatDuration = (seconds: number) => {
     if (!seconds) return '--';
@@ -886,8 +710,7 @@ export default function App() {
   const fetchHistory = async (id: number) => {
     setIsHistoryLoading(true);
     try {
-      const res = await fetch(`/api/test-cases/${id}/history`);
-      const data = await res.json();
+      const data = await apiClient.getHistory(id);
       setHistory(data);
     } catch (error) {
       console.error('Failed to fetch history:', error);
@@ -899,11 +722,7 @@ export default function App() {
   const fetchTaskDetail = async (taskId: number, openModal = true) => {
     setIsTaskDetailLoading(true);
     try {
-      const res = await fetch(`/api/tasks/${taskId}`);
-      if (!res.ok) {
-        throw new Error('Failed to fetch task detail');
-      }
-      const data = await res.json();
+      const data = await apiClient.getTaskDetail(taskId);
       setSelectedTaskDetail(data);
     } catch (error) {
       console.error('Failed to fetch task detail:', error);
@@ -921,15 +740,9 @@ export default function App() {
     setSimulationLogs([]);
     addToast('正在创建测试任务...', 'success');
     try {
-      const res = await fetch(`/api/test-cases/${id}/run`, { method: 'POST' });
-      if (res.ok) {
-        await res.json();
-        await fetchData();
-        addToast('测试任务已开始执行', 'success');
-      } else {
-        addToast('模拟执行启动失败', 'error');
-        setIsRunningSimulation(false);
-      }
+      await runTestCaseMutation.mutateAsync({ testCaseId: id });
+      await refreshExecutionData();
+      addToast('测试任务已开始执行', 'success');
     } catch (error) {
       console.error('Simulation failed:', error);
       addToast('模拟执行过程中发生错误', 'error');
@@ -937,14 +750,10 @@ export default function App() {
     }
   };
 
-  const analyzeDefect = async (defect: any) => {
+  const analyzeDefect = async (defect: Defect) => {
     setAnalyzingDefectId(defect.id);
     try {
-      const res = await fetch(`/api/defects/${defect.id}/analyze`, { method: 'POST' });
-      if (!res.ok) {
-        throw new Error('Failed to analyze defect');
-      }
-      const data = await res.json();
+      const data = await analyzeDefectMutation.mutateAsync(defect.id);
       setDefectAnalysis(prev => ({ ...prev, [defect.id]: data.analysis || "无法生成分析结果" }));
     } catch (error) {
       console.error('AI Analysis failed:', error);
@@ -974,7 +783,7 @@ export default function App() {
     ? `${reliabilityDelta >= 0 ? '通过率 +' : '通过率 '}${reliabilityDelta.toFixed(1)}%`
     : undefined;
   const severeDefectCount = Number(defectSummary.Critical || 0) + Number(defectSummary.Major || 0);
-  const assetCount = assets.length;
+  const assetCount = assetSummary.total;
   const dashboardDefectDistribution = [
     { label: 'Critical', count: Number(defectSummary.Critical || 0), color: 'bg-danger' },
     { label: 'Major', count: Number(defectSummary.Major || 0), color: 'bg-warning' },
@@ -982,15 +791,11 @@ export default function App() {
   ];
   const totalDashboardDefects = dashboardDefectDistribution.reduce((sum, item) => sum + item.count, 0);
 
-  const pingAsset = async (asset: any) => {
+  const pingAsset = async (asset: Asset) => {
     setPingingAssetId(asset.id);
     addToast(`正在 Ping ${asset.name}...`, 'success');
     try {
-      const res = await fetch(`/api/assets/${asset.id}/ping`, { method: 'POST' });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error || data.output || 'Ping failed');
-      }
+      const data = await pingAssetMutation.mutateAsync(asset.id);
       const latency = typeof data.latency_ms === 'number' ? `${data.latency_ms.toFixed(1)}ms` : '已响应';
       addToast(`${asset.name} (${data.address}) 响应正常，延迟 ${latency}`, 'success');
     } catch (error) {
@@ -1024,18 +829,9 @@ export default function App() {
     };
 
     try {
-      const res = await fetch('/api/assets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(assetData)
-      });
-      if (res.ok) {
-        addToast('资产注册成功', 'success');
-        fetchData();
-        setShowAssetModal(false);
-      } else {
-        addToast('资产注册失败', 'error');
-      }
+      await createAssetMutation.mutateAsync(assetData as Record<string, unknown>);
+      addToast('资产注册成功', 'success');
+      setShowAssetModal(false);
     } catch (error) {
       addToast('注册失败', 'error');
     }
@@ -1043,17 +839,11 @@ export default function App() {
 
   const deleteAsset = async (id: number) => {
     try {
-      const res = await fetch(`/api/assets/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        addToast('资产已删除', 'success');
-        fetchData();
-        setSelectedAsset(null);
-      } else {
-        const data = await res.json().catch(() => ({}));
-        addToast(data.error || '删除失败', 'error');
-      }
+      await deleteAssetMutation.mutateAsync(id);
+      addToast('资产已删除', 'success');
+      setSelectedAsset(null);
     } catch (error) {
-      addToast('删除失败', 'error');
+      addToast(error instanceof Error ? error.message : '删除失败', 'error');
     }
   };
 
@@ -1072,22 +862,12 @@ export default function App() {
     };
 
     try {
-      const res = await fetch(`/api/assets/${selectedAsset.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(assetData),
-      });
-      if (res.ok) {
-        addToast('资产已更新', 'success');
-        await fetchData();
-        setSelectedAsset((prev: any) => prev ? { ...prev, ...assetData } : prev);
-        setShowEditAssetModal(false);
-      } else {
-        const data = await res.json().catch(() => ({}));
-        addToast(data.error || '更新资产失败', 'error');
-      }
+      await updateAssetMutation.mutateAsync({ assetId: selectedAsset.id, body: assetData as Record<string, unknown> });
+      addToast('资产已更新', 'success');
+      setSelectedAsset((prev) => prev ? { ...prev, ...assetData } : prev);
+      setShowEditAssetModal(false);
     } catch (error) {
-      addToast('更新资产失败', 'error');
+      addToast(error instanceof Error ? error.message : '更新资产失败', 'error');
     }
   };
 
@@ -1114,6 +894,7 @@ export default function App() {
     const newCase = {
       title: formData.get('title'),
       category: formData.get('category'),
+      security_domain: formData.get('security_domain') || '未分类',
       type: formData.get('type'),
       protocol: formData.get('protocol'),
       description: formData.get('description'),
@@ -1132,18 +913,11 @@ export default function App() {
     };
 
     try {
-      const res = await fetch('/api/test-cases', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newCase)
-      });
-      if (res.ok) {
-        addToast('测试用例创建成功', 'success');
-        fetchData();
-        setShowCreateModal(false);
-        setCreateScriptPath('');
-        setCreateTestTool('');
-      }
+      await createCaseMutation.mutateAsync(newCase as Record<string, unknown>);
+      addToast('测试用例创建成功', 'success');
+      setShowCreateModal(false);
+      setCreateScriptPath('');
+      setCreateTestTool('');
     } catch (error) {
       addToast('创建失败', 'error');
     }
@@ -1161,45 +935,37 @@ export default function App() {
     );
 
     try {
-      const res = launchMode === 'suite'
-        ? await fetch(`/api/test-suites/${selectedSuiteId}/run`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              asset_id: selectedAssetId,
-              stop_on_failure: stopOnFailure,
-              runtime_inputs: runtimeInputs,
-            }),
-          })
-        : await fetch('/api/test-runs', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              test_case_ids: selectedCaseIds,
-              asset_id: selectedAssetId,
-              stop_on_failure: stopOnFailure,
-              runtime_inputs: runtimeInputs,
-            }),
-          });
-      if (res.ok) {
-        addToast(launchMode === 'suite' ? '基线套件任务已发起' : '测试任务已发起', 'success');
-        setShowTaskModal(false);
-        setStopOnFailure(false);
-        setTaskRuntimeInputs({});
-        setSelectedCaseIds([]);
-        setIsCasePickerOpen(false);
-        setIsAssetPickerOpen(false);
-        setSelectedAssetId('');
-        setSelectedSuiteId('');
-        setLaunchMode('suite');
-        setView('running');
-        fetchData();
+      if (launchMode === 'suite') {
+        await runSuiteMutation.mutateAsync({
+          suiteId: selectedSuiteId,
+          body: {
+            asset_id: selectedAssetId,
+            stop_on_failure: stopOnFailure,
+            runtime_inputs: runtimeInputs,
+          },
+        });
       } else {
-        const data = await res.json().catch(() => ({}));
-        addToast(data.error || '发起任务失败', 'error');
+        await runCasesMutation.mutateAsync({
+          asset_id: selectedAssetId,
+          test_case_ids: selectedCaseIds,
+          stop_on_failure: stopOnFailure,
+          runtime_inputs: runtimeInputs,
+        });
       }
+      addToast(launchMode === 'suite' ? '基线套件任务已发起' : '测试任务已发起', 'success');
+      setShowTaskModal(false);
+      setStopOnFailure(false);
+      setTaskRuntimeInputs({});
+      setSelectedCaseIds([]);
+      setIsCasePickerOpen(false);
+      setIsAssetPickerOpen(false);
+      setSelectedAssetId('');
+      setSelectedSuiteId('');
+      setLaunchMode('suite');
+      setView('running');
+      refreshExecutionData();
     } catch (error) {
-      addToast('发起任务失败', 'error');
+      addToast(error instanceof Error ? error.message : '发起任务失败', 'error');
     }
   };
 
@@ -1215,6 +981,7 @@ export default function App() {
     const updatedCase = {
       title: formData.get('title'),
       category: formData.get('category'),
+      security_domain: formData.get('security_domain') || '未分类',
       type: formData.get('type'),
       protocol: formData.get('protocol'),
       description: formData.get('description'),
@@ -1233,25 +1000,18 @@ export default function App() {
     };
 
     try {
-      const res = await fetch(`/api/test-cases/${selectedTestCase.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedCase)
-      });
-      if (res.ok) {
-        const patchedCase = {
-          ...selectedTestCase,
-          ...updatedCase,
-          timeout_sec: Number(updatedCase.timeout_sec || selectedTestCase.timeout_sec || 300),
-          steps: JSON.stringify(steps),
-          required_inputs: JSON.stringify(required_inputs),
-          default_runtime_inputs: JSON.stringify(default_runtime_inputs),
-        } as TestCase;
-        addToast('测试用例已更新', 'success');
-        fetchData();
-        setSelectedTestCase(patchedCase);
-        setShowEditModal(false);
-      }
+      await updateCaseMutation.mutateAsync({ testCaseId: selectedTestCase.id, body: updatedCase as Record<string, unknown> });
+      const patchedCase = {
+        ...selectedTestCase,
+        ...updatedCase,
+        timeout_sec: Number(updatedCase.timeout_sec || selectedTestCase.timeout_sec || 300),
+        steps: JSON.stringify(steps),
+        required_inputs: JSON.stringify(required_inputs),
+        default_runtime_inputs: JSON.stringify(default_runtime_inputs),
+      } as TestCase;
+      addToast('测试用例已更新', 'success');
+      setSelectedTestCase(patchedCase);
+      setShowEditModal(false);
     } catch (error) {
       addToast('更新失败', 'error');
     }
@@ -1260,15 +1020,49 @@ export default function App() {
   const handleImport = async () => {
     const lines = importText.split('\n').filter(l => l.includes('|'));
     if (lines.length < 3) return;
+    const hasSecurityDomainColumn = lines[0].includes('安全分类');
 
     // Skip header and separator
     const dataLines = lines.slice(2);
     const cases = dataLines.map(line => {
       const parts = line.split('|').map(p => p.trim()).filter(p => p !== '');
       if (parts.length < 7) return null;
+      if (hasSecurityDomainColumn) {
+        if (parts.length >= 15) {
+          return {
+            category: parts[0],
+            security_domain: parts[1] || '未分类',
+            title: parts[2],
+            protocol: parts[3],
+            type: parts[4],
+            test_input: parts[5],
+            test_tool: parts[6],
+            steps: parts[7],
+            expected_result: parts[8],
+            automation_level: parts[9],
+            description: parts[10] || '',
+            executor_type: parts[11] || 'python',
+            script_path: parts[12] || '',
+            command_template: '',
+            args_template: '',
+            timeout_sec: parts[13] || '300',
+            default_runtime_inputs: (() => {
+              if (!parts[14]) return {};
+              try {
+                const parsed = JSON.parse(parts[14]);
+                return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+              } catch {
+                return {};
+              }
+            })(),
+          };
+        }
+        return null;
+      }
       if (parts.length >= 15) {
         return {
           category: parts[0],
+          security_domain: '未分类',
           title: parts[1],
           protocol: parts[2],
           type: parts[3],
@@ -1297,6 +1091,7 @@ export default function App() {
       if (parts.length >= 14) {
         return {
           category: parts[0],
+          security_domain: '未分类',
           title: parts[1],
           protocol: parts[2],
           type: parts[3],
@@ -1325,6 +1120,7 @@ export default function App() {
       if (parts.length >= 10) {
         return {
           category: parts[0],
+          security_domain: '未分类',
           title: parts[1],
           protocol: parts[2],
           type: parts[3],
@@ -1344,6 +1140,7 @@ export default function App() {
       }
       return {
         category: parts[0],
+        security_domain: '未分类',
         title: parts[1],
         test_input: parts[2],
         test_tool: parts[3],
@@ -1357,38 +1154,38 @@ export default function App() {
         timeout_sec: '300',
         default_runtime_inputs: {},
       };
-    }).filter(c => c !== null);
+    }).filter((c): c is Record<string, unknown> => c !== null);
 
     try {
-      const res = await fetch('/api/test-cases/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cases })
-      });
-      if (res.ok) {
-        addToast(`成功导入 ${cases.length} 条测试用例`, 'success');
-        fetchData();
-        setShowImportModal(false);
-        setImportText('');
-      }
+      await importCasesMutation.mutateAsync(cases);
+      addToast(`成功导入 ${cases.length} 条测试用例`, 'success');
+      setShowImportModal(false);
+      setImportText('');
     } catch (error) {
       addToast('导入失败', 'error');
     }
   };
 
-  const deleteTestCase = async (id: number) => {
-    // In iframe environment, native confirm might be blocked. 
-    // For now, we proceed with deletion to ensure functionality works.
+  const requestDeleteTestCase = (id: number, title?: string) => {
+    const resolvedTitle = title || testCases.find((tc) => tc.id === id)?.title || `ID ${id}`;
+    setDeleteTestCaseCandidate({ id, title: resolvedTitle });
+  };
+
+  const confirmDeleteTestCase = async () => {
+    if (!deleteTestCaseCandidate) return;
+    setIsDeletingTestCase(true);
     try {
-      const res = await fetch(`/api/test-cases/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        addToast('测试用例已删除', 'success');
-        fetchData();
+      await deleteCaseMutation.mutateAsync(deleteTestCaseCandidate.id);
+      addToast('测试用例已删除', 'success');
+      if (selectedTestCase?.id === deleteTestCaseCandidate.id) {
         setShowEditModal(false);
         setSelectedTestCase(null);
       }
+      setDeleteTestCaseCandidate(null);
     } catch (error) {
       addToast('删除失败', 'error');
+    } finally {
+      setIsDeletingTestCase(false);
     }
   };
 
@@ -1407,18 +1204,10 @@ export default function App() {
     };
 
     try {
-      const res = await fetch('/api/test-suites', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        throw new Error('Failed to create suite');
-      }
+      await createSuiteMutation.mutateAsync(payload as Record<string, unknown>);
       addToast('测试套件创建成功', 'success');
       setShowSuiteModal(false);
       setSelectedSuiteCaseIds([]);
-      fetchData();
     } catch (error) {
       addToast('创建测试套件失败', 'error');
     }
@@ -1442,12 +1231,9 @@ export default function App() {
 
   const cancelTask = async (taskId: number) => {
     try {
-      const res = await fetch(`/api/tasks/${taskId}/cancel`, { method: 'PATCH' });
-      if (!res.ok) {
-        throw new Error('Failed to cancel task');
-      }
+      await cancelTaskMutation.mutateAsync(taskId);
       addToast('任务已取消', 'success');
-      fetchData();
+      refreshExecutionData();
       setIsRunningSimulation(false);
     } catch (error) {
       addToast('取消任务失败', 'error');
@@ -1456,13 +1242,9 @@ export default function App() {
 
   const retryTask = async (taskId: number) => {
     try {
-      const res = await fetch(`/api/tasks/${taskId}/retry`, { method: 'POST' });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to retry task');
-      }
+      await retryTaskMutation.mutateAsync(taskId);
       addToast('任务已重新加入执行队列', 'success');
-      fetchData();
+      refreshExecutionData();
       setView('running');
     } catch (error) {
       addToast(error instanceof Error ? error.message : '重试任务失败', 'error');
@@ -1471,12 +1253,8 @@ export default function App() {
 
   const deleteSuite = async (suiteId: number) => {
     try {
-      const res = await fetch(`/api/test-suites/${suiteId}`, { method: 'DELETE' });
-      if (!res.ok) {
-        throw new Error('Failed to delete suite');
-      }
+      await deleteSuiteMutation.mutateAsync(suiteId);
       addToast('测试套件已删除', 'success');
-      fetchData();
     } catch (error) {
       addToast('删除测试套件失败', 'error');
     }
@@ -1484,6 +1262,8 @@ export default function App() {
 
   const currentViewLabel = {
     dashboard: '仪表盘',
+    requirements: '需求管理',
+    tara: '威胁分析',
     management: '用例管理',
     suites: '测试套件',
     running: '仿真执行',
@@ -1510,45 +1290,109 @@ export default function App() {
 
   const toggleSetting = async (key: string) => {
     const newValue = !settings[key];
-    setSettings(prev => ({ ...prev, [key]: newValue }));
     try {
-      const res = await fetch(`/api/settings/${key}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value: newValue })
-      });
-      if (res.ok) {
-        addToast(`设置已更新`, 'success');
-      } else {
-        addToast('更新设置失败', 'error');
-        // Rollback
-        setSettings(prev => ({ ...prev, [key]: !newValue }));
-      }
+      await updateSettingMutation.mutateAsync({ key, value: newValue });
+      addToast(`设置已更新`, 'success');
     } catch (error) {
       console.error('Failed to update setting:', error);
       addToast('网络错误', 'error');
-      setSettings(prev => ({ ...prev, [key]: !newValue }));
     }
   };
   const updateTestCaseStatus = async (id: number, status: string) => {
     setUpdatingIds(prev => [...prev, id]);
     try {
-      const res = await fetch(`/api/test-cases/${id}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status })
-      });
-      if (res.ok) {
-        await fetchData();
-        addToast(`测试状态已更新为 ${status}`, 'success');
-      } else {
-        addToast('更新状态失败', 'error');
-      }
+      await updateCaseStatusMutation.mutateAsync({ testCaseId: id, status });
+      addToast(`测试状态已更新为 ${status}`, 'success');
     } catch (error) {
       console.error('Failed to update status:', error);
       addToast('网络错误，请稍后重试', 'error');
     } finally {
       setUpdatingIds(prev => prev.filter(uid => uid !== id));
+    }
+  };
+
+  const createRequirement = async (payload: Record<string, unknown>) => {
+    try {
+      const data = await createRequirementMutation.mutateAsync(payload);
+      addToast('需求已创建', 'success');
+      return Number((data as { id?: number })?.id || 0) || null;
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '创建需求失败', 'error');
+      return null;
+    }
+  };
+
+  const updateRequirement = async (id: number, payload: Record<string, unknown>) => {
+    try {
+      await updateRequirementMutation.mutateAsync({ requirementId: id, body: payload });
+      addToast('需求已更新', 'success');
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '更新需求失败', 'error');
+    }
+  };
+
+  const deleteRequirement = async (id: number) => {
+    try {
+      await deleteRequirementMutation.mutateAsync(id);
+      addToast('需求已删除', 'success');
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '删除需求失败', 'error');
+    }
+  };
+
+  const updateRequirementLinks = async (id: number, payload: Record<string, unknown>) => {
+    try {
+      await updateRequirementLinksMutation.mutateAsync({ requirementId: id, body: payload });
+      addToast('需求关联已更新', 'success');
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '更新需求关联失败', 'error');
+    }
+  };
+
+  const updateRequirementAssets = async (id: number, payload: Record<string, unknown>) => {
+    try {
+      await updateRequirementAssetsMutation.mutateAsync({ requirementId: id, body: payload });
+      addToast('需求适用资产已更新', 'success');
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '更新需求适用资产失败', 'error');
+    }
+  };
+
+  const createTaraItem = async (payload: Record<string, unknown>) => {
+    try {
+      const data = await createTaraItemMutation.mutateAsync(payload);
+      addToast('威胁项已创建', 'success');
+      return Number((data as { id?: number })?.id || 0) || null;
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '创建威胁项失败', 'error');
+      return null;
+    }
+  };
+
+  const updateTaraItem = async (id: number, payload: Record<string, unknown>) => {
+    try {
+      await updateTaraItemMutation.mutateAsync({ taraId: id, body: payload });
+      addToast('威胁项已更新', 'success');
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '更新威胁项失败', 'error');
+    }
+  };
+
+  const deleteTaraItem = async (id: number) => {
+    try {
+      await deleteTaraItemMutation.mutateAsync(id);
+      addToast('威胁项已删除', 'success');
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '删除威胁项失败', 'error');
+    }
+  };
+
+  const updateTaraLinks = async (id: number, payload: Record<string, unknown>) => {
+    try {
+      await updateTaraLinksMutation.mutateAsync({ taraId: id, body: payload });
+      addToast('TARA 关联已更新', 'success');
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '更新 TARA 关联失败', 'error');
     }
   };
 
@@ -1569,6 +1413,8 @@ export default function App() {
           <div className="px-8 mb-4 text-[10px] uppercase tracking-widest text-muted font-bold">平台功能</div>
           <nav className="space-y-1">
             <SidebarItem icon={LayoutDashboard} label="仪表盘" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
+            <SidebarItem icon={ShieldCheck} label="需求管理" active={view === 'requirements'} onClick={() => setView('requirements')} />
+            <SidebarItem icon={BrainCircuit} label="威胁分析 (TARA)" active={view === 'tara'} onClick={() => setView('tara')} />
             <SidebarItem icon={Database} label="用例管理" active={view === 'management'} onClick={() => setView('management')} />
             <SidebarItem icon={Layers3} label="测试套件" badge={testSuites.length ? String(testSuites.length) : undefined} active={view === 'suites'} onClick={() => setView('suites')} />
             <SidebarItem icon={PlayCircle} label="仿真执行" badge={String(activeExecutionTasks.length)} active={view === 'running'} onClick={() => setView('running')} />
@@ -1911,208 +1757,66 @@ export default function App() {
               </div>
             </div>
             </>
+          ) : view === 'requirements' ? (
+            <RequirementsPage
+              requirements={requirements}
+              requirementCoverage={requirementCoverage}
+              assets={assets}
+              testCases={testCases}
+              onCreateRequirement={createRequirement}
+              onUpdateRequirement={updateRequirement}
+              onDeleteRequirement={deleteRequirement}
+              onUpdateRequirementLinks={updateRequirementLinks}
+              onUpdateRequirementAssets={updateRequirementAssets}
+            />
+          ) : view === 'tara' ? (
+            <TaraPage
+              taraItems={taraItems}
+              requirements={requirements}
+              assets={assets}
+              onCreateTaraItem={createTaraItem}
+              onUpdateTaraItem={updateTaraItem}
+              onDeleteTaraItem={deleteTaraItem}
+              onUpdateTaraLinks={updateTaraLinks}
+            />
           ) : view === 'management' ? (
-            <div className="space-y-8">
-              <div className="flex justify-between items-end">
-                <div>
-                  <h2 className="text-2xl font-bold mb-2">测试用例管理</h2>
-                  <p className="text-sm text-text-secondary">维护全球 V2X 与车载系统安全测试基准库。</p>
-                </div>
-                <div className="flex gap-3">
-                  <div className="relative group">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted group-focus-within:text-accent transition-colors" size={14} />
-                    <input 
-                      type="text" 
-                      placeholder="搜索用例名称、类别或工具..."
-                      value={managementSearchQuery}
-                      onChange={(e) => setManagementSearchQuery(e.target.value)}
-                      className="bg-card border border-border rounded-lg pl-9 pr-4 py-2 text-xs w-64 focus:outline-none focus:border-accent transition-all"
-                    />
-                  </div>
-                  <button 
-                    onClick={() => setShowImportModal(true)}
-                    className="px-4 py-2 rounded-lg border border-border text-xs font-bold uppercase hover:bg-white/5 transition-colors flex items-center gap-2"
-                  >
-                    <Plus size={14} /> 批量导入
-                  </button>
-                  <button 
-                    onClick={() => setShowCreateModal(true)}
-                    className="bg-accent text-white px-4 py-2 rounded-lg text-xs font-bold uppercase flex items-center gap-2 hover:bg-[#4433EE] transition-colors"
-                  >
-                    <Plus size={14} /> 新建用例
-                  </button>
-                </div>
-              </div>
-
-              <div className="glass-card overflow-hidden table-shell">
-                <table className="w-full text-left data-table">
-                  <thead>
-                    <tr className="border-b border-border bg-white/2">
-                      <th className="px-6 py-4 text-[10px] font-bold uppercase text-muted tracking-widest w-16">序号</th>
-                      <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest">类别</th>
-                      <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest">名称</th>
-                      <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest">预期结果</th>
-                      <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest">工具</th>
-                      <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest">自动化</th>
-                      <th className="px-8 py-4 text-[10px] font-bold uppercase text-muted tracking-widest text-right">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {managementFilteredTestCases.map((tc, index) => (
-                      <tr key={tc.id} className="hover:bg-white/2 transition-colors group">
-                        <td className="px-6 py-4 text-xs text-muted font-mono">
-                          {index + 1}
-                        </td>
-                        <td className="px-8 py-4">
-                          <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-white/5 text-muted">
-                            {tc.category}
-                          </span>
-                        </td>
-                        <td className="px-8 py-4">
-                          <div className="font-bold text-sm">{tc.title}</div>
-                          <div className="text-[10px] text-muted truncate max-w-xs">{tc.protocol} • {tc.type}</div>
-                        </td>
-                        <td className="px-8 py-4 text-xs text-text-secondary max-w-sm">
-                          <div className="line-clamp-2">{tc.expected_result || '-'}</div>
-                        </td>
-                        <td className="px-8 py-4 text-xs font-mono text-accent">{tc.test_tool || '-'}</td>
-                        <td className="px-8 py-4">
-                          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${tc.automation_level === 'A' ? 'bg-success/20 text-success' : 'bg-warning/20 text-warning'}`}>
-                            {tc.automation_level || 'B'}
-                          </span>
-                        </td>
-                        <td className="px-8 py-4">
-                          <div className="flex gap-2 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); setShowEditModal(false); setSelectedTestCase(tc); }} className="p-1.5 hover:bg-white/10 rounded text-muted hover:text-white">
-                              <Search size={14} />
-                            </button>
-                            <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); setSelectedTestCase(tc); setShowEditModal(true); }} className="p-1.5 hover:bg-white/10 rounded text-muted hover:text-white">
-                              <Edit3 size={14} />
-                            </button>
-                            <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); deleteTestCase(tc.id); }} className="p-1.5 hover:bg-white/10 rounded text-danger/50 hover:text-danger">
-                              <Trash2 size={14} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <ManagementPage
+              managementCategoryFilter={managementCategoryFilter}
+              managementSecurityDomainFilter={managementSecurityDomainFilter}
+              managementAutomationFilter={managementAutomationFilter}
+              managementSearchQuery={managementSearchQuery}
+              managementCategoryOptions={managementCategoryOptions}
+              managementSecurityDomainOptions={managementSecurityDomainOptions}
+              managementFilteredTestCases={managementFilteredTestCases}
+              setManagementCategoryFilter={setManagementCategoryFilter}
+              setManagementSecurityDomainFilter={setManagementSecurityDomainFilter}
+              setManagementAutomationFilter={setManagementAutomationFilter}
+              setManagementSearchQuery={setManagementSearchQuery}
+              onOpenImport={() => setShowImportModal(true)}
+              onOpenCreate={() => setShowCreateModal(true)}
+              onViewCase={(tc) => {
+                setShowEditModal(false);
+                setSelectedTestCase(tc);
+              }}
+              onEditCase={(tc) => {
+                setSelectedTestCase(tc);
+                setShowEditModal(true);
+              }}
+              onDeleteCase={(id) => requestDeleteTestCase(id)}
+            />
           ) : view === 'suites' ? (
-            <div className="space-y-8">
-              <div className="flex justify-between items-end">
-                <div>
-                  <h2 className="text-2xl font-bold mb-2">测试套件编排</h2>
-                  <p className="text-sm text-text-secondary">将多个测试用例组合为顺序执行任务，适合核心回归与冒烟验证。</p>
-                </div>
-                <button
-                  onClick={() => setShowSuiteModal(true)}
-                  className="bg-accent text-white px-4 py-2 rounded-lg text-xs font-bold uppercase flex items-center gap-2 hover:bg-[#4433EE] transition-colors"
-                >
-                  <Plus size={14} /> 新建套件
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <div className="glass-card overflow-hidden table-shell">
-                  <div className="p-6 border-b border-border flex items-center justify-between">
-                    <h3 className="font-bold">已定义套件</h3>
-                    <span className="text-[10px] text-muted uppercase font-bold">{testSuites.length} 个套件</span>
-                  </div>
-                  <div className="divide-y divide-border">
-                    {testSuites.length === 0 ? (
-                      <div className="p-10 text-center text-muted italic">暂无测试套件</div>
-                    ) : (
-                      testSuites.map((suite) => (
-                        <div key={suite.id} className="p-6 space-y-4 hover:bg-white/2 transition-colors">
-                          <div className="flex items-start justify-between gap-4">
-                            <div>
-                              <div className="flex items-center gap-3 mb-2">
-                                <h4 className="font-bold text-lg">{suite.name}</h4>
-                                {suite.name === SECURITY_BASELINE_SUITE_NAME ? (
-                                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-accent/20 text-accent">
-                                    Baseline
-                                  </span>
-                                ) : null}
-                                <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-white/5 text-muted">
-                                  {suite.case_count} 条用例
-                                </span>
-                              </div>
-                              <p className="text-sm text-text-secondary">{suite.description || '未填写套件说明'}</p>
-                            </div>
-                            <div className="flex gap-2 shrink-0">
-                              <button
-                                onClick={() => runSuite(suite.id)}
-                                disabled={runningSuiteIds.includes(suite.id) || onlineAssets.length === 0}
-                                className="px-3 py-2 rounded-lg bg-accent text-white text-[10px] font-bold uppercase disabled:opacity-50"
-                              >
-                                {runningSuiteIds.includes(suite.id) ? '执行中' : '选择资产执行'}
-                              </button>
-                              <button
-                                onClick={() => deleteSuite(suite.id)}
-                                className="px-3 py-2 rounded-lg border border-danger/30 text-danger text-[10px] font-bold uppercase"
-                              >
-                                删除
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <div className="glass-card overflow-hidden table-shell">
-                  <div className="p-6 border-b border-border flex items-center justify-between">
-                    <h3 className="font-bold">最近套件执行</h3>
-                    <span className="text-[10px] text-muted uppercase font-bold">实时刷新</span>
-                  </div>
-                  <div className="divide-y divide-border">
-                    {suiteRuns.length === 0 ? (
-                      <div className="p-10 text-center text-muted italic">暂无执行记录</div>
-                    ) : (
-                      suiteRuns.map((run) => {
-                        const progress = run.total_cases > 0 ? Math.round((run.completed_cases / run.total_cases) * 100) : 0;
-                        return (
-                          <div key={run.id} className="p-6 space-y-3">
-                            <div className="flex items-start justify-between gap-4">
-                              <div>
-                                <div className="font-bold text-sm mb-1">{run.suite_name}</div>
-                                <div className="text-[10px] text-muted uppercase font-bold">
-                                  {run.status} • {run.completed_cases}/{run.total_cases}
-                                </div>
-                              </div>
-                              <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
-                                normalizeExecutionStatus(run.status) === 'COMPLETED' ? 'bg-success/20 text-success' :
-                                normalizeExecutionStatus(run.status) === 'RUNNING' ? 'bg-accent/20 text-accent' :
-                                'bg-warning/20 text-warning'
-                              }`}>
-                                {getExecutionStatusLabel(run.status)}
-                              </span>
-                            </div>
-                            <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
-                              <motion.div
-                                initial={{ width: 0 }}
-                                animate={{ width: `${progress}%` }}
-                                className="h-full bg-accent"
-                              />
-                            </div>
-                            <div className="grid grid-cols-4 gap-3 text-[10px] font-bold uppercase text-muted">
-                              <div>通过 {run.passed_cases}</div>
-                              <div>失败 {run.failed_cases}</div>
-                              <div>阻塞 {run.blocked_cases}</div>
-                              <div>{run.current_case_title ? `当前 ${run.current_case_title}` : '已结束'}</div>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
+            <SuitesPage
+              testSuites={testSuites}
+              suiteRuns={suiteRuns}
+              runningSuiteIds={runningSuiteIds}
+              onlineAssetsCount={onlineAssets.length}
+              securityBaselineSuiteName={SECURITY_BASELINE_SUITE_NAME}
+              normalizeExecutionStatus={normalizeExecutionStatus}
+              getExecutionStatusLabel={getExecutionStatusLabel}
+              onOpenCreateSuite={() => setShowSuiteModal(true)}
+              onRunSuite={(suiteId) => runSuite(suiteId)}
+              onDeleteSuite={(suiteId) => deleteSuite(suiteId)}
+            />
           ) : view === 'running' ? (
             <div className="space-y-8">
               <div className="flex justify-between items-end">
@@ -2457,75 +2161,15 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <div className="space-y-8">
-              <div className="flex justify-between items-end">
-                <div>
-                  <h2 className="text-2xl font-bold mb-2">测试资产库</h2>
-                  <p className="text-sm text-text-secondary">管理测试涉及的 ECU、车辆原型与仿真节点。</p>
-                </div>
-                <button 
-                  onClick={() => setShowAssetModal(true)}
-                  className="bg-accent text-white px-4 py-2 rounded-lg text-xs font-bold uppercase flex items-center gap-2 hover:bg-[#4433EE] transition-colors"
-                >
-                  <Plus size={14} /> 注册新资产
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                {assets.map((asset, i) => (
-                  <div 
-                    key={i} 
-                    onClick={() => setSelectedAsset(asset)}
-                    className="glass-card p-6 space-y-4 cursor-pointer hover:border-accent/50 transition-all group"
-                  >
-                    <div className="flex justify-between items-start">
-                      <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center text-accent group-hover:scale-110 transition-transform">
-                        <Cpu size={20} />
-                      </div>
-                      <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${asset.status === 'Online' ? 'bg-success/20 text-success' : 'bg-muted/20 text-muted'}`}>
-                        {asset.status}
-                      </span>
-                    </div>
-                    <div>
-                      <h4 className="font-bold">{asset.name}</h4>
-                      <p className="text-[10px] text-muted uppercase font-bold">{asset.type}</p>
-                    </div>
-                    <div className="space-y-2 pt-4 border-t border-border">
-                      <div className="flex justify-between items-center text-[10px] text-muted font-mono">
-                        <span>HW: {asset.hardware_version || '-'}</span>
-                        <span>SW: {asset.software_version || '-'}</span>
-                      </div>
-                      {asset.description ? (
-                        <p className="text-[10px] text-text-secondary line-clamp-2">{asset.description}</p>
-                      ) : null}
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={(e) => { e.stopPropagation(); pingAsset(asset); }}
-                          className="text-accent hover:underline text-[10px] font-bold uppercase"
-                        >
-                          {pingingAssetId === asset.id ? 'Ping中' : 'Ping'}
-                        </button>
-                        <button 
-                          onClick={(e) => { e.stopPropagation(); updateFirmware(asset.name); }}
-                          className="text-accent hover:underline text-[10px] font-bold uppercase"
-                        >
-                          升级
-                        </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); deleteAsset(asset.id); }}
-                          className="text-danger hover:underline text-[10px] font-bold uppercase"
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                {assets.length === 0 && (
-                  <div className="col-span-full py-20 text-center text-muted italic">资产库为空</div>
-                )}
-              </div>
-            </div>
+            <AssetsPage
+              assets={assets}
+              pingingAssetId={pingingAssetId}
+              onOpenRegisterAsset={() => setShowAssetModal(true)}
+              onSelectAsset={(asset) => setSelectedAsset(asset)}
+              onPingAsset={(asset) => pingAsset(asset)}
+              onUpdateFirmware={(name) => updateFirmware(name)}
+              onDeleteAsset={(id) => deleteAsset(id)}
+            />
           )}
         </div>
       </main>
@@ -2533,12 +2177,16 @@ export default function App() {
       {/* Create Modal */}
       <AnimatePresence>
         {showCreateModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setShowCreateModal(false)}
+          >
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               className="glass-card w-full max-w-md p-8 bg-card modal-surface"
+              onClick={(event) => event.stopPropagation()}
             >
               <div className="flex justify-between items-start mb-6">
                 <h3 className="text-xl font-bold tracking-tighter uppercase">新建测试用例</h3>
@@ -2573,6 +2221,14 @@ export default function App() {
                       <option value="BLE">BLE</option>
                     </select>
                   </div>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">安全分类</label>
+                  <select name="security_domain" defaultValue="未分类" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
+                    {SECURITY_DOMAIN_OPTIONS.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
@@ -2682,308 +2338,56 @@ export default function App() {
       </AnimatePresence>
 
       {/* Task Modal (Launch Test) */}
-      <AnimatePresence>
-        {showTaskModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-md p-8 bg-card modal-surface"
-            >
-              <div className="flex justify-between items-start mb-6">
-                <h3 className="text-xl font-bold tracking-tighter uppercase">发起测试任务</h3>
-                <button onClick={() => setShowTaskModal(false)} className="text-muted hover:text-white">
-                  <XCircle size={24} />
-                </button>
-              </div>
-
-              <form onSubmit={createTestTask} className="space-y-6">
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-2 block">任务模式</label>
-                  <div className="rounded-xl border border-border bg-bg p-1 grid grid-cols-2 gap-1">
-                    <button
-                      type="button"
-                      onClick={() => setLaunchMode('suite')}
-                      className={`px-3 py-2 rounded-lg text-xs font-bold uppercase transition-colors ${launchMode === 'suite' ? 'bg-accent text-white' : 'text-muted hover:text-text-primary'}`}
-                    >
-                      资产 + 套件
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setLaunchMode('cases')}
-                      className={`px-3 py-2 rounded-lg text-xs font-bold uppercase transition-colors ${launchMode === 'cases' ? 'bg-accent text-white' : 'text-muted hover:text-text-primary'}`}
-                    >
-                      资产 + 用例
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-2 block">1. 选择在线资产</label>
-                  <div className="rounded-xl border border-border bg-white/2 overflow-hidden">
-                    <button
-                      type="button"
-                      onClick={() => setIsAssetPickerOpen((prev) => !prev)}
-                      className="w-full px-4 py-3 flex items-center justify-between gap-4 text-left hover:bg-white/5 transition-colors"
-                    >
-                      <div className="min-w-0">
-                        <div className={`text-sm ${selectedLaunchAsset ? 'text-text-primary font-semibold' : 'text-muted'} truncate`}>
-                          {selectedAssetSummary}
-                        </div>
-                        <div className="text-[10px] text-muted mt-1">点击展开后选择一个在线资产</div>
-                      </div>
-                      <div className={`text-muted transition-transform ${isAssetPickerOpen ? 'rotate-90' : ''}`}>
-                        <ChevronRight size={16} />
-                      </div>
-                    </button>
-
-                    {isAssetPickerOpen && (
-                      <div className="max-h-72 overflow-y-auto space-y-2 border-t border-border p-3">
-                        {onlineAssets.map((asset: any) => {
-                          const checked = String(selectedAssetId) === String(asset.id);
-                          return (
-                            <label key={asset.id} className={`flex items-start gap-3 rounded-xl border px-3 py-3 transition-colors ${checked ? 'border-accent bg-accent/5' : 'border-border bg-transparent'}`}>
-                              <input
-                                type="radio"
-                                name="selected-asset"
-                                checked={checked}
-                                onChange={() => setSelectedAssetId(String(asset.id))}
-                                className="mt-1"
-                              />
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center justify-between gap-3">
-                                  <div className="text-sm font-bold">{asset.name}</div>
-                                  <div className="text-[11px] text-muted font-mono whitespace-nowrap">
-                                    IP:{asset.connection_address || '未配置'}
-                                  </div>
-                                </div>
-                              </div>
-                            </label>
-                          );
-                        })}
-                        {onlineAssets.length === 0 && (
-                          <div className="text-center py-6 text-sm text-muted italic">当前没有在线资产可选</div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {launchMode === 'suite' ? (
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-[10px] uppercase font-bold text-text-secondary block">2. 选择要执行的测试套件</label>
-                      {selectedLaunchSuite ? (
-                        <span className="text-[10px] text-muted font-bold">{selectedLaunchSuite.case_count} 条用例</span>
-                      ) : null}
-                    </div>
-                    <div className="rounded-xl border border-border bg-bg overflow-hidden">
-                      <button
-                        type="button"
-                        onClick={() => setIsCasePickerOpen((prev) => !prev)}
-                        className="w-full min-h-12 px-4 py-3 flex items-center justify-between gap-4 text-left hover:bg-white/5 transition-colors"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className={`text-sm ${selectedLaunchSuite ? 'text-text-primary' : 'text-muted'} truncate`}>
-                            {selectedSuiteSummary}
-                          </div>
-                        </div>
-                        <div className={`text-muted transition-transform ${isCasePickerOpen ? 'rotate-180' : ''}`}>
-                          <ChevronRight size={18} className="rotate-90" />
-                        </div>
-                      </button>
-                      {isCasePickerOpen && (
-                        <div className="max-h-64 overflow-y-auto space-y-2 border-t border-border p-2">
-                          {testSuites.map((suite) => {
-                            const checked = String(selectedSuiteId) === String(suite.id);
-                            const isBaseline = suite.name === SECURITY_BASELINE_SUITE_NAME;
-                            return (
-                              <label key={suite.id} className={`flex items-start gap-3 rounded-lg px-3 py-2 transition-colors ${checked ? 'bg-accent/8' : 'hover:bg-white/5'}`}>
-                                <input
-                                  type="radio"
-                                  name="selected-suite"
-                                  checked={checked}
-                                  onChange={() => setSelectedSuiteId(String(suite.id))}
-                                  className="mt-1"
-                                />
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-sm font-medium flex items-center gap-2">
-                                    <span>{suite.name}</span>
-                                    {isBaseline ? (
-                                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-accent/20 text-accent">Baseline</span>
-                                    ) : null}
-                                  </div>
-                                  <div className="text-[10px] text-muted mt-1">{suite.case_count} 条用例</div>
-                                </div>
-                              </label>
-                            );
-                          })}
-                          {testSuites.length === 0 && (
-                            <div className="text-center py-4 text-[12px] text-muted">暂无可用套件</div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-[10px] uppercase font-bold text-text-secondary block">2. 选择要执行的测试用例</label>
-                      <span className="text-[10px] text-muted font-bold">{selectedCaseIds.length} 项已选</span>
-                    </div>
-                    <div className="rounded-xl border border-border bg-bg overflow-hidden">
-                      <button
-                        type="button"
-                        onClick={() => setIsCasePickerOpen((prev) => !prev)}
-                        className="w-full min-h-12 px-4 py-3 flex items-center justify-between gap-4 text-left hover:bg-white/5 transition-colors"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className={`text-sm ${selectedCaseIds.length === 0 ? 'text-muted' : 'text-text-primary'} truncate`}>
-                            {selectedCaseSummary}
-                          </div>
-                        </div>
-                        <div className={`text-muted transition-transform ${isCasePickerOpen ? 'rotate-180' : ''}`}>
-                          <ChevronRight size={18} className="rotate-90" />
-                        </div>
-                      </button>
-
-                      {isCasePickerOpen && (
-                        <div className="max-h-64 overflow-y-auto space-y-2 border-t border-border p-2">
-                          {testCases.map((tc) => {
-                            const checked = selectedCaseIds.includes(tc.id);
-                            return (
-                              <label key={tc.id} className={`flex items-start gap-3 rounded-lg px-3 py-2 transition-colors ${checked ? 'bg-accent/8' : 'hover:bg-white/5'}`}>
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  onChange={(e) => {
-                                    setSelectedCaseIds((prev) => e.target.checked ? [...prev, tc.id] : prev.filter((id) => id !== tc.id));
-                                  }}
-                                  className="mt-1"
-                                />
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-sm font-medium">{tc.title}</div>
-                                </div>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {launchMode === 'cases' && selectedLaunchRequiredInputs.length > 0 && (
-                  <div className="space-y-3">
-                    {(() => {
-                      const editableRuntimeOptions = REQUIRED_INPUT_OPTIONS.filter(
-                        (option) => option.value !== 'connection_address' && selectedLaunchRequiredInputs.includes(option.value)
-                      );
-                      return (
-                        <div className="rounded-xl border border-border bg-white/2 overflow-hidden">
-                          <button
-                            type="button"
-                            onClick={() => setIsRuntimeInputsOpen((prev) => !prev)}
-                            className="w-full px-4 py-3 flex items-center justify-between gap-4 text-left hover:bg-white/5 transition-colors"
-                          >
-                            <div className="min-w-0">
-                              <div className="text-[10px] uppercase font-bold text-text-secondary tracking-widest">运行时输入</div>
-                              <div className="text-[11px] text-muted mt-1">
-                                {editableRuntimeOptions.length === 0
-                                  ? '无手工输入字段，连接地址将自动注入。'
-                                  : `共 ${editableRuntimeOptions.length} 个可配置字段${selectedLaunchInputConflicts.length > 0 ? `，${selectedLaunchInputConflicts.length} 个默认值冲突` : ''}`}
-                              </div>
-                            </div>
-                            <div className={`text-muted transition-transform ${isRuntimeInputsOpen ? 'rotate-180' : ''}`}>
-                              <ChevronRight size={16} className="rotate-90" />
-                            </div>
-                          </button>
-
-                          {isRuntimeInputsOpen && (
-                            <div className="border-t border-border p-4 space-y-3">
-                              {selectedLaunchInputConflicts.length > 0 && (
-                                <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-xs text-text-secondary">
-                                  已选择用例存在默认值冲突，请手工确认以下字段：{selectedLaunchInputConflicts.map((key) => REQUIRED_INPUT_OPTIONS.find((option) => option.value === key)?.label || key).join('、')}
-                                </div>
-                              )}
-                              {selectedLaunchRequiredInputs.includes('connection_address') && (
-                                <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-xs text-text-secondary">
-                                  连接地址将从所选测试资产自动注入脚本，不需要手工填写。
-                                </div>
-                              )}
-                              {editableRuntimeOptions.map((option) => (
-                                <div key={option.value} className="space-y-2">
-                                  <label className="text-[10px] uppercase font-bold text-text-secondary block">{option.label}</label>
-                                  <input
-                                    type={option.value.toLowerCase().includes('password') ? 'password' : option.value.endsWith('_port') ? 'number' : 'text'}
-                                    value={taskRuntimeInputs[option.value] || ''}
-                                    required={!selectedLaunchDefaultInputs[option.value]}
-                                    min={option.value.endsWith('_port') ? 1 : undefined}
-                                    onChange={(e) => setTaskRuntimeInputs((prev) => ({ ...prev, [option.value]: e.target.value }))}
-                                    className="w-full bg-bg border border-border rounded-lg px-3 py-3 text-sm focus:outline-none focus:border-accent"
-                                    placeholder={selectedLaunchDefaultInputs[option.value] ? `${option.description}（已预填）` : option.description}
-                                  />
-                                  {selectedLaunchDefaultInputs[option.value] && (
-                                    <div className="text-[10px] text-muted">
-                                      已从用例默认值预填：<span className="font-mono">{selectedLaunchDefaultInputs[option.value]}</span>
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
-
-                <div className="p-4 rounded-xl bg-accent/5 border border-accent/10">
-                  <div className="flex items-center gap-3 text-accent mb-2">
-                    <Zap size={16} />
-                    <span className="text-xs font-bold uppercase tracking-wider">任务预检</span>
-                  </div>
-                  <p className="text-[10px] text-muted leading-relaxed">
-                    发起任务后，系统会先做前置检查（连接地址、端口连通性、adb/ssh 工具可用性），通过后再执行。
-                  </p>
-                </div>
-
-                <label className="flex items-center justify-between p-4 rounded-xl border border-border bg-white/2">
-                  <div>
-                    <div className="text-xs font-bold uppercase tracking-wider">失败即停</div>
-                    <div className="text-[10px] text-muted mt-1">任务内任一步失败后，立即停止后续执行。</div>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={stopOnFailure}
-                    onChange={(e) => setStopOnFailure(e.target.checked)}
-                    className="h-4 w-4"
-                  />
-                </label>
-
-                <button 
-                  type="submit" 
-                  disabled={launchMode === 'suite' ? (!selectedSuiteId || !selectedAssetId) : (selectedCaseIds.length === 0 || !selectedAssetId)}
-                  className="w-full bg-accent py-4 rounded-xl text-xs font-bold uppercase hover:bg-[#4433EE] transition-all shadow-lg shadow-accent/20 disabled:opacity-50"
-                >
-                  {launchMode === 'suite' ? '对当前资产执行套件' : '对当前资产开始执行'}
-                </button>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      <TaskLaunchModal
+        showTaskModal={showTaskModal}
+        setShowTaskModal={setShowTaskModal}
+        createTestTask={createTestTask}
+        launchMode={launchMode}
+        setLaunchMode={setLaunchMode}
+        setIsAssetPickerOpen={setIsAssetPickerOpen}
+        selectedLaunchAsset={selectedLaunchAsset}
+        selectedAssetSummary={selectedAssetSummary}
+        isAssetPickerOpen={isAssetPickerOpen}
+        onlineAssets={onlineAssets}
+        selectedAssetId={selectedAssetId}
+        setSelectedAssetId={setSelectedAssetId}
+        selectedLaunchSuite={selectedLaunchSuite}
+        selectedSuiteSummary={selectedSuiteSummary}
+        isCasePickerOpen={isCasePickerOpen}
+        setIsCasePickerOpen={setIsCasePickerOpen}
+        testSuites={testSuites}
+        selectedSuiteId={selectedSuiteId}
+        setSelectedSuiteId={setSelectedSuiteId}
+        securityBaselineSuiteName={SECURITY_BASELINE_SUITE_NAME}
+        selectedCaseIds={selectedCaseIds}
+        selectedCaseSummary={selectedCaseSummary}
+        testCases={testCases}
+        setSelectedCaseIds={setSelectedCaseIds}
+        selectedLaunchRequiredInputs={selectedLaunchRequiredInputs}
+        requiredInputOptions={REQUIRED_INPUT_OPTIONS}
+        selectedLaunchInputConflicts={selectedLaunchInputConflicts}
+        isRuntimeInputsOpen={isRuntimeInputsOpen}
+        setIsRuntimeInputsOpen={setIsRuntimeInputsOpen}
+        selectedLaunchDefaultInputs={selectedLaunchDefaultInputs}
+        taskRuntimeInputs={taskRuntimeInputs}
+        setTaskRuntimeInputs={setTaskRuntimeInputs}
+        stopOnFailure={stopOnFailure}
+        setStopOnFailure={setStopOnFailure}
+      />
 
       {/* Suite Modal */}
       <AnimatePresence>
         {showSuiteModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setShowSuiteModal(false)}
+          >
             <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               className="glass-card w-full max-w-2xl p-8 bg-card"
+              onClick={(event) => event.stopPropagation()}
             >
               <div className="flex justify-between items-start mb-6">
                 <h3 className="text-xl font-bold tracking-tighter uppercase">新建测试套件</h3>
@@ -3038,12 +2442,16 @@ export default function App() {
       {/* Import Modal */}
       <AnimatePresence>
         {showImportModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setShowImportModal(false)}
+          >
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               className="glass-card w-full max-w-2xl p-8 bg-card"
+              onClick={(event) => event.stopPropagation()}
             >
               <div className="flex justify-between items-start mb-6">
                 <h3 className="text-xl font-bold tracking-tighter uppercase">批量导入测试用例</h3>
@@ -3058,9 +2466,9 @@ export default function App() {
                   value={importText}
                   onChange={(e) => setImportText(e.target.value)}
                   className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none h-64 scrollbar-hide"
-                  placeholder={`| 目标模块/业务域 | 用例名称 | 测试协议 | 测试类型 | 测试输入 | 测试工具 | 测试步骤 | 预期结果 | 自动化等级 | 描述 | 执行器类型 | 脚本路径 | 超时秒数 | 默认输入(JSON) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| IVI | SSH访问控制验证 | Ethernet | Automated | 系统登录IP地址 | SSH | 步骤1\\n步骤2 | 未授权账号应被拒绝 | A | 验证IVI SSH访问控制 | python | scripts/ssh_access_check.py | 300 | {"ssh_port":"22"} |`}
+                  placeholder={`| 目标模块/业务域 | 安全分类 | 用例名称 | 测试协议 | 测试类型 | 测试输入 | 测试工具 | 测试步骤 | 预期结果 | 自动化等级 | 描述 | 执行器类型 | 脚本路径 | 超时秒数 | 默认输入(JSON) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| IVI | 访问控制 | SSH访问控制验证 | Ethernet | Automated | 系统登录IP地址 | SSH | 步骤1\\n步骤2 | 未授权账号应被拒绝 | A | 验证IVI SSH访问控制 | python | scripts/ssh_access_check.py | 300 | {"ssh_port":"22"} |`}
                 />
                 <div className="flex gap-3 pt-4">
                   <button 
@@ -3086,12 +2494,16 @@ export default function App() {
       {/* Register Asset Modal */}
       <AnimatePresence>
         {showAssetModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setShowAssetModal(false)}
+          >
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               className="glass-card w-full max-w-md p-8 bg-card modal-surface"
+              onClick={(event) => event.stopPropagation()}
             >
               <div className="flex justify-between items-start mb-6">
                 <h3 className="text-xl font-bold tracking-tighter uppercase">注册新资产</h3>
@@ -3144,12 +2556,16 @@ export default function App() {
       {/* Asset Detail Modal */}
       <AnimatePresence>
         {selectedAsset && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setSelectedAsset(null)}
+          >
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               className="glass-card w-full max-w-lg p-8 bg-card modal-surface"
+              onClick={(event) => event.stopPropagation()}
             >
               <div className="flex justify-between items-start mb-6">
                 <div className="flex items-center gap-4">
@@ -3254,12 +2670,16 @@ export default function App() {
       {/* Edit Asset Modal */}
       <AnimatePresence>
         {showEditAssetModal && selectedAsset && (
-          <div className="fixed inset-0 z-[55] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div
+            className="fixed inset-0 z-[55] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setShowEditAssetModal(false)}
+          >
             <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               className="glass-card w-full max-w-md p-8 bg-card modal-surface"
+              onClick={(event) => event.stopPropagation()}
             >
               <div className="flex justify-between items-start mb-6">
                 <h3 className="text-xl font-bold tracking-tighter uppercase">编辑资产</h3>
@@ -3331,199 +2751,61 @@ export default function App() {
       </AnimatePresence>
 
       {/* Task Detail Modal */}
+      <TaskDetailModal
+        selectedTaskDetail={selectedTaskDetail}
+        setSelectedTaskDetail={setSelectedTaskDetail}
+        getExecutionStatusLabel={getExecutionStatusLabel}
+        getFailureCategoryMeta={getFailureCategoryMeta}
+        formatServerDateTime={formatServerDateTime}
+        isTaskDetailLoading={isTaskDetailLoading}
+        taskDetailView={taskDetailView}
+        normalizeTestResult={normalizeTestResult}
+        normalizeExecutionStatus={normalizeExecutionStatus}
+        formatDuration={formatDuration}
+        parseStepResults={parseStepResults}
+        getStepExecutionBadge={getStepExecutionBadge}
+      />
+
       <AnimatePresence>
-        {selectedTaskDetail && (
-          <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+        {deleteTestCaseCandidate && (
+          <div
+            className="fixed inset-0 z-[140] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+            onClick={() => {
+              if (!isDeletingTestCase) setDeleteTestCaseCandidate(null);
+            }}
+          >
             <motion.div
               initial={{ opacity: 0, scale: 0.96 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.96 }}
-              className="glass-card w-full max-w-4xl max-h-[88vh] overflow-hidden bg-card modal-surface"
+              transition={{ duration: 0.18, ease: "easeOut" }}
+              className="glass-card w-full max-w-md rounded-2xl bg-card p-6 modal-surface"
+              onClick={(event) => event.stopPropagation()}
             >
-              <div className="flex items-start justify-between p-6 border-b border-border">
-                <div>
-                  <h3 className="text-xl font-bold tracking-tighter uppercase">
-                    {selectedTaskDetail.task.type === 'suite' ? selectedTaskDetail.task.suite_name : selectedTaskDetail.task.test_case_title || `任务 #${selectedTaskDetail.task.id}`}
-                  </h3>
-                  <p className="text-[10px] text-muted uppercase font-bold tracking-widest mt-2">
-                    任务 #{selectedTaskDetail.task.id} • {selectedTaskDetail.task.type === 'suite' ? '套件任务' : '单用例任务'} • {selectedTaskDetail.task.executor || 'python'}
-                  </p>
-                </div>
-                <button onClick={() => setSelectedTaskDetail(null)} className="text-muted hover:text-white">
-                  <XCircle size={24} />
-                </button>
+              <div className="text-lg font-bold">确认删除测试用例</div>
+              <div className="mt-3 text-sm text-text-secondary leading-relaxed">
+                即将删除
+                <span className="mx-1 font-semibold text-text-primary">{deleteTestCaseCandidate.title}</span>
+                ，删除后无法恢复。
               </div>
-
-              <div className="p-6 space-y-6 overflow-y-auto max-h-[calc(88vh-88px)]">
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">任务状态</div>
-                    <div className="font-bold text-sm">{getExecutionStatusLabel(selectedTaskDetail.task.status)}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">执行资产</div>
-                    <div className="font-bold text-sm">{selectedTaskDetail.task.asset_name || '未绑定资产'}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">执行策略</div>
-                    <div className="font-bold text-sm">{selectedTaskDetail.task.stop_on_failure ? '失败即停' : '全部执行'}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">重试次数</div>
-                    <div className="font-bold text-sm">{selectedTaskDetail.task.retry_count || 0}</div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">失败分类</div>
-                    <div className={`font-bold text-sm ${getFailureCategoryMeta(selectedTaskDetail.task.failure_category).className}`}>
-                      {getFailureCategoryMeta(selectedTaskDetail.task.failure_category).label}
-                    </div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">重试策略</div>
-                    <div className="font-bold text-sm">{selectedTaskDetail.task.can_retry ? '可重试' : '不可重试'}</div>
-                    {!selectedTaskDetail.task.can_retry && selectedTaskDetail.task.retry_block_reason ? (
-                      <div className="text-[10px] text-muted mt-1">{selectedTaskDetail.task.retry_block_reason}</div>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">开始时间</div>
-                    <div>{formatServerDateTime(selectedTaskDetail.task.started_at)}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">结束时间</div>
-                    <div>{formatServerDateTime(selectedTaskDetail.task.finished_at)}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">通过/失败</div>
-                    <div>{selectedTaskDetail.task.passed_items}/{selectedTaskDetail.task.failed_items}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">当前项</div>
-                    <div>{selectedTaskDetail.task.current_case_title || selectedTaskDetail.task.current_item_label || '已结束'}</div>
-                  </div>
-                </div>
-
-                {selectedTaskDetail.task.error_message && (
-                  <div className="rounded-xl border border-danger/20 bg-danger/5 p-4">
-                    <div className="text-[10px] text-danger uppercase font-bold mb-1">失败原因</div>
-                    <div className="text-sm text-danger">{selectedTaskDetail.task.error_message}</div>
-                  </div>
-                )}
-
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">执行明细</h4>
-                    {isTaskDetailLoading && <Activity size={14} className="animate-spin text-accent" />}
-                  </div>
-
-                  <div className="space-y-3">
-                    {selectedTaskDetail.items.map((item) => (
-                      <div key={item.id} className="rounded-2xl border border-border bg-white/2 p-4 space-y-3">
-                        <div className="flex items-start justify-between gap-4">
-                          <div>
-                            <div className="font-bold text-sm">{item.sort_order}. {item.title}</div>
-                            <div className="text-[10px] text-muted uppercase font-bold mt-1">
-                              {item.category || '未分类'} • {item.protocol || '未标记协议'} • {item.test_tool || '未指定工具'}
-                            </div>
-                          </div>
-                          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
-                            normalizeTestResult(item.result || item.run_result) === 'PASSED' ? 'bg-success/20 text-success' :
-                            normalizeTestResult(item.result || item.run_result) === 'FAILED' ? 'bg-danger/20 text-danger' :
-                            normalizeTestResult(item.result || item.run_result) === 'ERROR' ? 'bg-danger/20 text-danger' :
-                            normalizeTestResult(item.result || item.run_result) === 'BLOCKED' ? 'bg-warning/20 text-warning' :
-                            normalizeExecutionStatus(item.status) === 'RUNNING' ? 'bg-accent/20 text-accent' :
-                            'bg-white/5 text-muted'
-                          }`}>
-                            {normalizeTestResult(item.result || item.run_result) || getExecutionStatusLabel(item.status)}
-                          </span>
-                        </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                          <div className="rounded-xl border border-border bg-white/2 p-3">
-                            <div className="text-[10px] text-muted uppercase font-bold mb-1">预期结果</div>
-                            <div className="text-text-secondary">{item.expected_result || '-'}</div>
-                          </div>
-                          <div className="rounded-xl border border-border bg-white/2 p-3">
-                            <div className="text-[10px] text-muted uppercase font-bold mb-1">测试输入</div>
-                            <div className="text-text-secondary font-mono break-all">{item.test_input || '-'}</div>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-3 gap-3 text-[10px] text-muted font-mono">
-                          <div>开始: {formatServerDateTime(item.started_at)}</div>
-                          <div>结束: {formatServerDateTime(item.finished_at)}</div>
-                          <div>耗时: {item.duration ? formatDuration(item.duration) : '--'}</div>
-                        </div>
-
-                        <div className="rounded-xl border border-border bg-black/20 p-3">
-                          <div className="text-[10px] text-muted uppercase font-bold mb-2">执行日志</div>
-                          <pre className="text-[11px] leading-relaxed whitespace-pre-wrap break-words text-text-secondary">
-                            {item.summary || item.logs || '当前任务没有返回日志。若是刚启动，请等待执行器回传结果。'}
-                          </pre>
-                        </div>
-
-                        {parseStepResults(item.step_results).length > 0 && (
-                          <div className="rounded-xl border border-border bg-white/2 p-3 space-y-2">
-                            <div className="text-[10px] text-muted uppercase font-bold mb-1">脚本返回步骤结果</div>
-                            {parseStepResults(item.step_results).map((step, index) => (
-                              <div key={`${item.id}-${index}`} className="rounded-lg border border-border bg-white/2 px-3 py-3 space-y-1.5">
-                                <div className="flex items-center justify-between gap-3">
-                                  <div className="min-w-0 text-sm text-text-primary font-semibold">
-                                    {step.name}
-                                  </div>
-                                  <span className={`text-[10px] font-bold uppercase ${getStepExecutionBadge(step).className}`}>
-                                    {getStepExecutionBadge(step).label}
-                                  </span>
-                                </div>
-                                <div className="text-[11px] text-text-secondary">
-                                  {step.conclusion || step.security_assessment || step.logs || '无额外结论。'}
-                                </div>
-                                {(step.command || step.stdout || step.stderr || step.output || typeof step.exit_code === 'number' || step.timestamp) && (
-                                  <details className="rounded-md border border-border bg-black/10 px-2 py-1">
-                                    <summary className="text-[10px] text-muted cursor-pointer select-none">展开明细</summary>
-                                    <div className="mt-2 space-y-1.5 text-[11px] text-text-secondary">
-                                      {step.command ? (
-                                        <div>
-                                          命令: <span className="font-mono break-all">{step.command}</span>
-                                        </div>
-                                      ) : null}
-                                      {typeof step.exit_code === 'number' ? (
-                                        <div>
-                                          退出码: <span className="font-mono">{step.exit_code}</span>
-                                        </div>
-                                      ) : null}
-                                      {step.timestamp ? (
-                                        <div>
-                                          时间: <span className="font-mono">{formatServerDateTime(step.timestamp)}</span>
-                                        </div>
-                                      ) : null}
-                                      {step.stdout || step.output ? (
-                                        <div>
-                                          stdout: <span className="font-mono break-all">{step.stdout || step.output}</span>
-                                        </div>
-                                      ) : null}
-                                      {step.stderr ? (
-                                        <div>
-                                          stderr: <span className="font-mono break-all">{step.stderr}</span>
-                                        </div>
-                                      ) : null}
-                                    </div>
-                                  </details>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              <div className="mt-2 text-xs text-muted">关联需求/TARA 关系会一并解除。</div>
+              <div className="mt-6 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  disabled={isDeletingTestCase}
+                  onClick={() => setDeleteTestCaseCandidate(null)}
+                  className="px-4 py-2 rounded-lg border border-border text-sm font-bold text-text-secondary hover:text-text-primary hover:bg-white/5 transition-colors disabled:opacity-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeletingTestCase}
+                  onClick={confirmDeleteTestCase}
+                  className="px-4 py-2 rounded-lg bg-danger text-white text-sm font-bold hover:bg-danger/90 transition-colors disabled:opacity-50"
+                >
+                  {isDeletingTestCase ? '删除中...' : '确认删除'}
+                </button>
               </div>
             </motion.div>
           </div>
@@ -3622,7 +2904,7 @@ export default function App() {
                         </button>
                         <button 
                           type="button"
-                          onClick={() => deleteTestCase(selectedTestCase.id)}
+                          onClick={() => requestDeleteTestCase(selectedTestCase.id, selectedTestCase.title)}
                           className="px-4 py-3 rounded-xl border border-danger/20 text-danger font-bold text-xs uppercase hover:bg-danger/5 transition-colors"
                         >
                           <Trash2 size={16} />
@@ -3706,6 +2988,10 @@ export default function App() {
                         <div className="font-bold text-sm">{selectedTestCase.type}</div>
                       )}
                     </div>
+                    <div className="p-4 rounded-xl bg-white/2 border border-border col-span-2">
+                      <div className="text-[10px] text-muted uppercase font-bold mb-1">安全分类</div>
+                      <div className="font-bold text-sm">{selectedTestCase.security_domain || '未分类'}</div>
+                    </div>
                   </div>
 
                   {showEditModal && (
@@ -3727,6 +3013,14 @@ export default function App() {
                           <option value="OTA">OTA</option>
                           <option value="V2X">V2X</option>
                           <option value="BLE">BLE</option>
+                        </select>
+                      </div>
+                      <div className="p-4 rounded-xl bg-white/2 border border-border">
+                        <div className="text-[10px] text-muted uppercase font-bold mb-2">安全分类</div>
+                        <select name="security_domain" defaultValue={selectedTestCase.security_domain || '未分类'} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
+                          {SECURITY_DOMAIN_OPTIONS.map((option) => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
                         </select>
                       </div>
                       <div className="p-4 rounded-xl bg-white/2 border border-border">

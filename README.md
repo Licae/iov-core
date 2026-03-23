@@ -48,17 +48,39 @@ npm run dev
 
 ```bash
 npm run dev
+npm run dev:backend
+npm run start
 npm run lint
 npm run build
 ```
 
 ## 数据存储
 
-- SQLite 数据库文件：`v2x_testing.db`
+- SQLite 数据库文件默认位置：`runtime-data/v2x_testing.db`
 - 默认由服务启动时自动建表和补齐缺失字段
+
+## 项目结构
+
+```text
+backend/
+  app/            # Express + Vite 挂载与 API 装配
+  db/             # SQLite 初始化、迁移、归档维护
+  execution/      # 任务编排、执行链路、worker 客户端
+  executors/      # 执行器适配器与插件注册
+  repositories/   # 数据访问层
+  routes/         # /api 路由
+  services/       # 报告、资产产物、基线数据等服务
+src/              # React 前端
+scripts/          # 安全测试脚本
+analysis/         # 用例评估与导入模板
+runtime-artifacts/# 执行期产物（默认不入库）
+runtime-data/     # 本地 SQLite 数据
+```
 
 ## 说明
 
 - 后端 API 统一挂载在 `/api`
-- 开发环境由 `server.ts` 启动 Express，并内嵌 Vite 中间件
-- 生产构建后由 Express 直接托管 `dist/`
+- 开发环境由 `backend/server.ts` 启动 Express，并内嵌 Vite 中间件
+- 任务执行 worker 进程入口：`backend/execution/execution-worker-process.ts`
+- 数据库路径可由 `DB_PATH` 指定，默认 `runtime-data/v2x_testing.db`
+- 运行产物默认写入 `runtime-artifacts/`

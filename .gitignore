@@ -4,7 +4,15 @@ dist/
 coverage/
 .DS_Store
 *.log
+*.tmp
+*.temp
 .env*
 !.env.example
 runtime-artifacts/*
 !runtime-artifacts/.gitkeep
+runtime-data/*
+!runtime-data/.gitkeep
+v2x_testing.db
+__pycache__/
+*.py[cod]
+.pytest_cache/

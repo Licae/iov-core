@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>人工交互测试成品稿 v1</title>
+  <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #111936;
+      --panel-2: #0e1530;
+      --line: #26345f;
+      --text: #eaf0ff;
+      --muted: #9fb0dd;
+      --accent: #3f6dff;
+      --success: #1ecb86;
+      --warn: #ffbf47;
+      --danger: #ff6b6b;
+      --purple: #8076ff;
+      --chip: #19244a;
+      --shadow: 0 24px 60px rgba(4, 10, 26, .58);
+      --radius: 16px;
+      --radius-lg: 22px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 700px at -10% -10%, #233f95 0%, rgba(35, 63, 149, 0) 55%),
+        radial-gradient(900px 620px at 105% -10%, #5134a0 0%, rgba(81, 52, 160, 0) 52%),
+        linear-gradient(160deg, #090f1f 0%, #0a1226 42%, #0a1020 100%);
+      min-height: 100vh;
+      padding: 28px;
+    }
+
+    .header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      margin-bottom: 22px;
+    }
+
+    .title {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: .4px;
+      margin: 0;
+    }
+
+    .subtitle {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(63, 109, 255, .18);
+      border: 1px solid rgba(118, 150, 255, .35);
+      color: #cfe0ff;
+      font-size: 12px;
+    }
+
+    .canvas {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(580px, 1fr));
+      gap: 18px;
+    }
+
+    .screen {
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(152, 173, 232, .16);
+      background: linear-gradient(180deg, rgba(16, 24, 52, .92), rgba(10, 17, 38, .95));
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      min-height: 640px;
+      position: relative;
+    }
+
+    .screen-head {
+      padding: 14px 18px;
+      border-bottom: 1px solid rgba(137, 162, 228, .16);
+      background: rgba(255, 255, 255, .02);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: #cad8ff;
+    }
+
+    .screen-body {
+      padding: 16px;
+      height: calc(100% - 52px);
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 14px;
+      height: 100%;
+    }
+
+    .sidebar {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel-2);
+      padding: 12px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      margin-bottom: 14px;
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: linear-gradient(145deg, #55a4ff, #5564ff);
+      box-shadow: 0 0 0 5px rgba(79, 112, 255, .2);
+    }
+
+    .nav { display: grid; gap: 8px; }
+
+    .nav-item {
+      padding: 10px 12px;
+      border-radius: 10px;
+      color: #b8c8f1;
+      font-size: 13px;
+      border: 1px solid transparent;
+    }
+
+    .nav-item.active {
+      color: #eef4ff;
+      background: rgba(63, 109, 255, .18);
+      border-color: rgba(123, 152, 255, .45);
+    }
+
+    .main {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .topbar {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel-2);
+      padding: 11px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .chips { display: flex; gap: 8px; }
+
+    .chip {
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: var(--chip);
+      border: 1px solid #2b3d73;
+      color: #bed0ff;
+      font-size: 12px;
+    }
+
+    .content-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: linear-gradient(180deg, #101a39, #0c1531);
+      padding: 14px;
+      min-height: 0;
+    }
+
+    .section-title {
+      margin: 0 0 10px;
+      font-size: 15px;
+      letter-spacing: .2px;
+    }
+
+    .task-table {
+      display: grid;
+      gap: 8px;
+    }
+
+    .task-row {
+      display: grid;
+      grid-template-columns: 2fr 1.1fr .8fr 1fr;
+      gap: 8px;
+      align-items: center;
+      padding: 10px;
+      background: rgba(255, 255, 255, .02);
+      border: 1px solid rgba(147, 166, 224, .18);
+      border-radius: 10px;
+      font-size: 12px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 82px;
+      padding: 5px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .tag.pause { background: rgba(128, 118, 255, .2); border: 1px solid rgba(161, 154, 255, .5); color: #e2deff; }
+    .tag.run { background: rgba(63, 109, 255, .2); border: 1px solid rgba(123, 152, 255, .5); color: #d6e3ff; }
+    .tag.ok { background: rgba(30, 203, 134, .18); border: 1px solid rgba(102, 222, 167, .46); color: #d5fff0; }
+    .tag.bad { background: rgba(255, 107, 107, .18); border: 1px solid rgba(255, 137, 137, .46); color: #ffe0e0; }
+
+    .btns { display: flex; gap: 7px; justify-content: flex-end; }
+
+    .btn {
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid #3350a7;
+      background: #172651;
+      color: #d9e6ff;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .btn.primary { background: linear-gradient(145deg, #3f6dff, #5b52ff); border-color: #728cff; }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 10px;
+      min-height: 0;
+    }
+
+    .list, .panel {
+      border: 1px solid rgba(147, 166, 224, .18);
+      border-radius: 10px;
+      padding: 10px;
+      background: rgba(255, 255, 255, .015);
+    }
+
+    .list-item {
+      padding: 9px;
+      border-radius: 8px;
+      border: 1px solid rgba(141, 163, 225, .18);
+      margin-bottom: 8px;
+      font-size: 12px;
+      background: rgba(255, 255, 255, .015);
+    }
+
+    .kv { display: grid; grid-template-columns: 78px 1fr; gap: 8px; font-size: 12px; margin-bottom: 7px; }
+    .k { color: var(--muted); }
+
+    .timeline {
+      margin-top: 8px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .timeline-step {
+      border-left: 2px solid #3d57aa;
+      padding: 6px 0 6px 10px;
+      font-size: 12px;
+    }
+
+    .overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(5, 10, 23, .66);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+    }
+
+    .modal {
+      width: min(560px, 100%);
+      border-radius: 14px;
+      background: linear-gradient(180deg, #121e42, #0d1735);
+      border: 1px solid #334f9b;
+      box-shadow: 0 30px 80px rgba(3, 8, 20, .65);
+      padding: 14px;
+    }
+
+    .field { margin-bottom: 10px; }
+    .label { font-size: 11px; color: #a8bbeb; margin-bottom: 6px; display: block; }
+
+    .input, .textarea, .select {
+      width: 100%;
+      border: 1px solid #314d96;
+      background: #0f1b3d;
+      border-radius: 8px;
+      color: #ebf1ff;
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+
+    .textarea { min-height: 78px; resize: none; }
+
+    .evidence {
+      border: 1px dashed #4c67b7;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 12px;
+      color: #afc1ee;
+      background: rgba(21, 35, 78, .55);
+    }
+
+    .foot {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .mobile {
+      grid-column: span 2;
+      border-radius: 20px;
+      border: 1px solid rgba(152, 173, 232, .18);
+      background: linear-gradient(180deg, rgba(15, 24, 54, .95), rgba(10, 18, 39, .98));
+      padding: 14px;
+    }
+
+    .mobile-frame {
+      width: 390px;
+      margin: 0 auto;
+      border-radius: 22px;
+      border: 1px solid #314d97;
+      background: #0d1733;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+
+    .m-head { padding: 12px; border-bottom: 1px solid #253c78; font-weight: 600; font-size: 13px; }
+    .m-body { padding: 10px; }
+
+    .m-card {
+      border: 1px solid rgba(141, 163, 225, .25);
+      border-radius: 11px;
+      padding: 10px;
+      margin-bottom: 9px;
+      background: rgba(255, 255, 255, .02);
+      font-size: 12px;
+    }
+
+    @media (max-width: 1300px) {
+      .canvas { grid-template-columns: 1fr; }
+      .mobile { grid-column: auto; }
+      .screen { min-height: 580px; }
+      .app { grid-template-columns: 180px 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1 class="title">人工交互测试 · 高保真成品稿</h1>
+      <p class="subtitle">覆盖任务中心、任务详情、人工提交流程和移动端待办处理关键场景</p>
+    </div>
+    <span class="badge">版本 v1 · 适配现有 IOV-CORE 风格</span>
+  </div>
+
+  <section class="canvas">
+    <article class="screen">
+      <div class="screen-head">
+        <span>Screen A · 任务中心（含人工待处理）</span>
+        <span>Desktop 1440</span>
+      </div>
+      <div class="screen-body">
+        <div class="app">
+          <aside class="sidebar">
+            <div class="brand"><span class="dot"></span> IOV-CORE</div>
+            <div class="nav">
+              <div class="nav-item">仪表盘</div>
+              <div class="nav-item">测试套件</div>
+              <div class="nav-item active">运行中任务</div>
+              <div class="nav-item">缺陷日志</div>
+              <div class="nav-item">测试资产</div>
+            </div>
+          </aside>
+          <div class="main">
+            <div class="topbar">
+              <div class="chips">
+                <span class="chip">状态: 全部</span>
+                <span class="chip">资产: T-BOX-LAB-02</span>
+                <span class="chip">仅看人工待办: 开</span>
+              </div>
+              <div class="btns">
+                <button class="btn">刷新</button>
+                <button class="btn primary">发起任务</button>
+              </div>
+            </div>
+            <div class="content-card">
+              <h3 class="section-title">执行队列</h3>
+              <div class="task-table">
+                <div class="task-row">
+                  <div>系统安全基线套件 / CASE-027 BLE认证安全测试</div>
+                  <div><span class="tag pause">PAUSED_MANUAL</span></div>
+                  <div>进度 18/31</div>
+                  <div class="btns"><button class="btn">查看详情</button><button class="btn primary">进入人工处理</button></div>
+                </div>
+                <div class="task-row">
+                  <div>系统安全基线套件 / CASE-015 SSH访问控制验证</div>
+                  <div><span class="tag run">RUNNING</span></div>
+                  <div>进度 7/31</div>
+                  <div class="btns"><button class="btn">查看详情</button></div>
+                </div>
+                <div class="task-row">
+                  <div>OTA专项回归 / CASE-003 升级包签名校验</div>
+                  <div><span class="tag ok">COMPLETED</span></div>
+                  <div>通过 26 / 失败 2</div>
+                  <div class="btns"><button class="btn">报告</button><button class="btn">重试失败项</button></div>
+                </div>
+                <div class="task-row">
+                  <div>车云通信专项 / CASE-072 远程指令重放测试</div>
+                  <div><span class="tag bad">FAILED</span></div>
+                  <div>失败即停</div>
+                  <div class="btns"><button class="btn">查看详情</button><button class="btn">复测</button></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <article class="screen">
+      <div class="screen-head">
+        <span>Screen B · 任务详情（人工步骤）</span>
+        <span>Desktop 1440</span>
+      </div>
+      <div class="screen-body">
+        <div class="app">
+          <aside class="sidebar">
+            <div class="brand"><span class="dot"></span> IOV-CORE</div>
+            <div class="nav">
+              <div class="nav-item">任务中心</div>
+              <div class="nav-item active">任务详情</div>
+              <div class="nav-item">执行证据</div>
+            </div>
+          </aside>
+          <div class="main">
+            <div class="topbar">
+              <div class="chips">
+                <span class="chip">任务 #20260324-018</span>
+                <span class="chip">当前项: CASE-027</span>
+                <span class="chip">执行人: 待领取</span>
+              </div>
+              <div class="btns"><button class="btn">取消任务</button><button class="btn primary">开始人工执行</button></div>
+            </div>
+            <div class="content-card two-col">
+              <div class="list">
+                <h3 class="section-title">步骤列表</h3>
+                <div class="list-item">1. 连接资产并校验前置环境 <span class="tag ok">PASSED</span></div>
+                <div class="list-item">2. 自动采集 BLE 会话数据 <span class="tag ok">PASSED</span></div>
+                <div class="list-item" style="border-color:#7b6fff;background:rgba(128,118,255,.09)">3. 人工分析配对认证与 MITM 防护 <span class="tag pause">WAITING_MANUAL</span></div>
+                <div class="list-item">4. 汇总并写入测试结论 <span class="tag">PENDING</span></div>
+              </div>
+              <div class="panel">
+                <h3 class="section-title">人工步骤详情</h3>
+                <div class="kv"><div class="k">目标</div><div>确认 BLE 配对模式是否强制认证，是否具备 MITM 防护。</div></div>
+                <div class="kv"><div class="k">输入</div><div>抓包文件 `ble_pairing_20260324.pcapng`、设备日志、nRF Connect 报告。</div></div>
+                <div class="kv"><div class="k">判定标准</div><div>若检测到 Just Works 且可被未授权设备复用，判定 FAILED。</div></div>
+                <div class="timeline">
+                  <div class="timeline-step">10:31 自动采集已完成，待人工复核</div>
+                  <div class="timeline-step">10:36 操作员领取任务（王XX）</div>
+                  <div class="timeline-step">10:41 上传初步证据 2 份</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <article class="screen">
+      <div class="screen-head">
+        <span>Screen C · 人工提交弹窗（最终交付）</span>
+        <span>Desktop 1440</span>
+      </div>
+      <div class="screen-body" style="padding:0; position:relative;">
+        <div class="overlay">
+          <div class="modal">
+            <h3 class="section-title" style="margin-bottom:12px">提交人工测试结果 · CASE-027</h3>
+            <div class="field">
+              <label class="label">执行结论</label>
+              <select class="select">
+                <option>PASSED</option>
+                <option selected>FAILED</option>
+                <option>BLOCKED</option>
+                <option>ERROR</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label">失败分类</label>
+              <select class="select">
+                <option selected>PERMISSION</option>
+                <option>ENVIRONMENT</option>
+                <option>SCRIPT</option>
+                <option>NONE</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label">人工结论说明</label>
+              <textarea class="textarea">检测到配对流程允许 Just Works 模式，且无需二次认证即可复连，存在未授权接入风险，判定不通过。</textarea>
+            </div>
+            <div class="field">
+              <label class="label">证据附件</label>
+              <div class="evidence">已上传: pairing_trace.pcapng / mitm_attempt.mp4 / logcat_ble.txt</div>
+            </div>
+            <div class="field">
+              <label class="label">复测建议（可选）</label>
+              <input class="input" value="开启 Numeric Comparison 并强制用户确认后重测" />
+            </div>
+            <div class="foot">
+              <button class="btn">保存草稿</button>
+              <button class="btn">取消</button>
+              <button class="btn primary">提交并恢复后续执行</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <article class="mobile">
+      <div class="screen-head" style="border:none;padding:4px 2px 12px; background:none;">Screen D · Mobile 人工待办处理</div>
+      <div class="mobile-frame">
+        <div class="m-head">人工待办 · 2</div>
+        <div class="m-body">
+          <div class="m-card">
+            <div style="font-weight:600;margin-bottom:4px">CASE-027 BLE认证安全测试</div>
+            <div style="color:#a8bbeb;margin-bottom:8px">任务#20260324-018 · T-BOX-LAB-02</div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span class="tag pause">WAITING_MANUAL</span>
+              <button class="btn primary">立即处理</button>
+            </div>
+          </div>
+          <div class="m-card">
+            <div style="font-weight:600;margin-bottom:4px">CASE-041 车云指令重放测试</div>
+            <div style="color:#a8bbeb;margin-bottom:8px">任务#20260324-012 · CLOUD-SIM-01</div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span class="tag">IN_MANUAL</span>
+              <button class="btn">继续填写</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+  </section>
+</body>
+</html>

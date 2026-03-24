@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IOV-CORE 人工交互集成稿 v2</title>
+  <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+  <style>
+    :root {
+      --bg: #050505;
+      --card: #111111;
+      --border: #222222;
+      --text-primary: #ffffff;
+      --text-secondary: #888888;
+      --accent: #5544ff;
+      --accent-strong: #4433ee;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text-primary);
+      font-family: Inter, "PingFang SC", "Noto Sans SC", sans-serif;
+      background: var(--bg);
+    }
+
+    .page {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 250px 1fr;
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--border);
+      padding: 28px 20px;
+      background: #070707;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 26px;
+      font-weight: 800;
+      letter-spacing: .4px;
+    }
+
+    .logo-box {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      background: var(--accent);
+      display: grid;
+      place-items: center;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .nav-title {
+      color: var(--text-secondary);
+      font-size: 10px;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+      margin: 18px 8px 8px;
+      font-weight: 700;
+    }
+
+    .nav-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+      color: #b0b0b0;
+      font-size: 14px;
+      margin-bottom: 6px;
+      border-left: 3px solid transparent;
+    }
+
+    .nav-item.active {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.05);
+      border-left-color: var(--accent);
+    }
+
+    .main {
+      display: grid;
+      grid-template-rows: 64px 1fr;
+      min-width: 0;
+    }
+
+    .topbar {
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+    }
+
+    .content {
+      padding: 20px;
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 14px;
+      min-height: 0;
+    }
+
+    .glass-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 20px 50px rgba(0,0,0,.22);
+    }
+
+    .panel-head {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .panel-title {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+
+    .panel-body { padding: 14px 16px; }
+
+    .task-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 10px;
+      background: rgba(255,255,255,.02);
+    }
+
+    .task-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .title { font-size: 16px; font-weight: 700; }
+    .sub { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 88px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .pill-pending { background: rgba(85,68,255,.2); color: #bdb6ff; }
+    .pill-running { background: rgba(85,68,255,.2); color: #8fbcff; }
+    .pill-manual { background: rgba(245,158,11,.2); color: #ffcf7a; }
+    .pill-pass { background: rgba(16,185,129,.2); color: #6ee7b7; }
+    .pill-fail { background: rgba(239,68,68,.2); color: #fca5a5; }
+
+    .kv-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-family: "JetBrains Mono", monospace;
+    }
+
+    .btns { display: flex; gap: 8px; margin-top: 10px; }
+
+    .btn {
+      border: 1px solid var(--border);
+      background: #151515;
+      color: #d2d2d2;
+      border-radius: 8px;
+      padding: 7px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+    }
+
+    .btn-accent {
+      border-color: #4f44cf;
+      background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+      color: #fff;
+    }
+
+    .detail-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+
+    .detail-item {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      background: rgba(255,255,255,.015);
+    }
+
+    .detail-title {
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 5px;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .detail-txt { color: #b8b8b8; font-size: 11px; line-height: 1.5; }
+
+    .modal-mask {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.82);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .modal {
+      width: min(940px, 100%);
+      max-height: 88vh;
+      overflow: auto;
+      background: #111111;
+      border: 1px solid #2a2a2a;
+      border-radius: 14px;
+      box-shadow: 0 36px 120px rgba(0,0,0,.5);
+    }
+
+    .modal-head {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+    }
+
+    .modal-title { font-size: 18px; font-weight: 800; }
+    .modal-sub { margin-top: 6px; font-size: 10px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .9px; }
+
+    .modal-body {
+      padding: 16px 18px;
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 12px;
+    }
+
+    .form-card, .step-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      background: rgba(255,255,255,.015);
+    }
+
+    .label {
+      color: var(--text-secondary);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      margin-bottom: 5px;
+      display: block;
+      font-weight: 700;
+    }
+
+    .input, .textarea, .select {
+      width: 100%;
+      background: #090909;
+      border: 1px solid #2b2b2b;
+      border-radius: 8px;
+      color: #fff;
+      padding: 8px 10px;
+      font-size: 12px;
+      font-family: inherit;
+    }
+
+    .textarea { min-height: 84px; resize: vertical; }
+
+    .dropzone {
+      border: 1px dashed #3f3f3f;
+      border-radius: 8px;
+      padding: 10px;
+      color: #9d9d9d;
+      font-size: 11px;
+      background: #0b0b0b;
+    }
+
+    .footer {
+      padding: 12px 18px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .note {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(245,158,11,.25);
+      background: rgba(245,158,11,.08);
+      color: #f6c677;
+      font-size: 11px;
+    }
+
+    .map-box {
+      margin-top: 16px;
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid #2f2f2f;
+      background: #0d0d0d;
+      font-size: 11px;
+      color: #a9a9a9;
+      line-height: 1.6;
+      font-family: "JetBrains Mono", monospace;
+    }
+
+    .accent { color: #c4bcff; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <aside class="sidebar">
+      <div class="logo"><div class="logo-box">IO</div><div>IOV-CORE</div></div>
+      <div class="nav-title">平台功能</div>
+      <div class="nav-item">仪表盘</div>
+      <div class="nav-item">威胁分析 (TARA)</div>
+      <div class="nav-item">需求管理</div>
+      <div class="nav-item">用例管理</div>
+      <div class="nav-item">测试套件</div>
+      <div class="nav-item active">仿真执行</div>
+      <div class="nav-item">缺陷日志</div>
+      <div class="nav-item">测试资产</div>
+      <div class="nav-item">分析报告</div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <div>平台 / <span class="accent">仿真执行（人工交互增强稿）</span></div>
+        <div style="font-size:11px;color:#999">基于现有 `running` 页结构扩展</div>
+      </header>
+
+      <section class="content">
+        <div class="glass-card">
+          <div class="panel-head">
+            <div class="panel-title">运行中测试任务</div>
+            <div>
+              <button class="btn">筛选: 人工待处理</button>
+              <button class="btn btn-accent">发起测试任务</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="task-card">
+              <div class="task-row">
+                <div>
+                  <div class="title">系统安全基线套件</div>
+                  <div class="sub">测试套件 • 31 条用例</div>
+                </div>
+                <span class="pill pill-manual">PAUSED_MANUAL</span>
+              </div>
+              <div class="kv-line">
+                <span>状态: 人工待处理</span>
+                <span>完成: 18/31</span>
+                <span>通过: 16</span>
+                <span>失败: 1</span>
+                <span>阻塞: 1</span>
+                <span>当前: BLE认证安全测试</span>
+              </div>
+              <div class="btns">
+                <button class="btn">查看任务详情</button>
+                <button class="btn btn-accent">进入人工处理</button>
+              </div>
+            </div>
+
+            <div class="task-card">
+              <div class="task-row">
+                <div>
+                  <div class="title">OTA 升级专项</div>
+                  <div class="sub">测试套件 • 10 条用例</div>
+                </div>
+                <span class="pill pill-running">RUNNING</span>
+              </div>
+              <div class="kv-line">
+                <span>状态: 执行中</span>
+                <span>完成: 6/10</span>
+                <span>通过: 5</span>
+                <span>失败: 1</span>
+                <span>策略: 失败即停</span>
+                <span>执行器: python</span>
+              </div>
+              <div class="btns">
+                <button class="btn">查看任务详情</button>
+                <button class="btn">取消任务</button>
+              </div>
+            </div>
+
+            <div class="task-card">
+              <div class="task-row">
+                <div>
+                  <div class="title">SSH 访问控制验证</div>
+                  <div class="sub">单用例任务 • T-BOX-LAB-02</div>
+                </div>
+                <span class="pill pill-pass">COMPLETED</span>
+              </div>
+              <div class="kv-line">
+                <span>结果: PASSED</span>
+                <span>失败分类: NONE</span>
+                <span>执行器: python</span>
+                <span>重试次数: 0</span>
+              </div>
+              <div class="btns">
+                <button class="btn">查看任务详情</button>
+                <button class="btn">重试任务</button>
+              </div>
+            </div>
+
+            <div class="map-box">
+              [组件映射]
+              Running 页面列表: src/App.tsx (view === 'running')
+              任务状态标签: normalizeExecutionStatus + getExecutionStatusLabel
+              扩展状态: PAUSED_MANUAL / WAITING_MANUAL（新增枚举后即落地）
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-card">
+          <div class="panel-head">
+            <div class="panel-title">任务详情卡片（右侧预览）</div>
+          </div>
+          <div class="panel-body detail-grid">
+            <div class="detail-item">
+              <div class="detail-title">
+                <span>任务 #20260324-018</span>
+                <span class="pill pill-manual">PAUSED_MANUAL</span>
+              </div>
+              <div class="detail-txt">当前项: CASE-027 BLE认证安全测试</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-title"><span>执行明细</span></div>
+              <div class="detail-txt">1. 连接地址校验: PASSED</div>
+              <div class="detail-txt">2. 自动采集脚本: PASSED</div>
+              <div class="detail-txt">3. 人工复核: WAITING_MANUAL</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-title"><span>人工步骤字段</span></div>
+              <div class="detail-txt">manual_result / failure_category / conclusion / evidence / operator</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">
+        <div>
+          <div class="modal-title">任务详情 · CASE-027 人工复核提交</div>
+          <div class="modal-sub">对应组件: `TaskDetailModal` 扩展人工提交区</div>
+        </div>
+        <button class="btn">关闭</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-card">
+          <label class="label">执行结论（manual_result）</label>
+          <select class="select">
+            <option>PASSED</option>
+            <option selected>FAILED</option>
+            <option>BLOCKED</option>
+            <option>ERROR</option>
+          </select>
+
+          <div style="height:10px"></div>
+
+          <label class="label">失败分类（failure_category）</label>
+          <select class="select">
+            <option>NONE</option>
+            <option selected>PERMISSION</option>
+            <option>ENVIRONMENT</option>
+            <option>SCRIPT</option>
+          </select>
+
+          <div style="height:10px"></div>
+
+          <label class="label">人工结论（conclusion）</label>
+          <textarea class="textarea">检测到 BLE 配对链路允许 Just Works，且可在无二次验证场景下复连，存在未授权接入风险，判定 FAILED。</textarea>
+
+          <div style="height:10px"></div>
+
+          <label class="label">上传证据（evidence）</label>
+          <div class="dropzone">拖拽或点击上传: pairing_trace.pcapng / mitm_attempt.mp4 / device_log.txt</div>
+
+          <div style="height:10px"></div>
+
+          <label class="label">执行人（operator）</label>
+          <input class="input" value="王XX" />
+
+          <div class="note">提交后: 当前 item -> COMPLETED；task -> PENDING 并重新 enqueue 继续后续用例。</div>
+        </div>
+
+        <div class="step-card">
+          <div class="label">脚本返回步骤结果（step_results）</div>
+          <div class="detail-item" style="margin-bottom:8px">
+            <div class="detail-title"><span>前置检查：连接地址</span><span class="pill pill-pass">PASSED</span></div>
+            <div class="detail-txt">连接地址 10.20.2.15 已就绪。</div>
+          </div>
+          <div class="detail-item" style="margin-bottom:8px">
+            <div class="detail-title"><span>自动采集：BLE 报文抓取</span><span class="pill pill-pass">PASSED</span></div>
+            <div class="detail-txt">已输出 artifact: ble_pairing_20260324.pcapng</div>
+          </div>
+          <div class="detail-item" style="border-color:rgba(245,158,11,.28)">
+            <div class="detail-title"><span>人工复核</span><span class="pill pill-manual">WAITING_MANUAL</span></div>
+            <div class="detail-txt">待人工提交最终结论。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <button class="btn">保存草稿</button>
+        <button class="btn">取消</button>
+        <button class="btn btn-accent">提交并恢复任务</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

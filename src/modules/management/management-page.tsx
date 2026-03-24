@@ -120,7 +120,11 @@ export const ManagementPage = ({
           </thead>
           <tbody className="divide-y divide-border">
             {managementFilteredTestCases.map((tc, index) => (
-              <tr key={tc.id} className="hover:bg-white/2 transition-colors group">
+              <tr
+                key={tc.id}
+                className="hover:bg-white/2 transition-colors group cursor-pointer"
+                onClick={() => onViewCase(tc)}
+              >
                 <td className="px-6 py-4 text-xs text-muted font-mono">
                   {index + 1}
                 </td>

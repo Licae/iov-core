@@ -1413,8 +1413,8 @@ export default function App() {
           <div className="px-8 mb-4 text-[10px] uppercase tracking-widest text-muted font-bold">平台功能</div>
           <nav className="space-y-1">
             <SidebarItem icon={LayoutDashboard} label="仪表盘" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
-            <SidebarItem icon={ShieldCheck} label="需求管理" active={view === 'requirements'} onClick={() => setView('requirements')} />
             <SidebarItem icon={BrainCircuit} label="威胁分析 (TARA)" active={view === 'tara'} onClick={() => setView('tara')} />
+            <SidebarItem icon={ShieldCheck} label="需求管理" active={view === 'requirements'} onClick={() => setView('requirements')} />
             <SidebarItem icon={Database} label="用例管理" active={view === 'management'} onClick={() => setView('management')} />
             <SidebarItem icon={Layers3} label="测试套件" badge={testSuites.length ? String(testSuites.length) : undefined} active={view === 'suites'} onClick={() => setView('suites')} />
             <SidebarItem icon={PlayCircle} label="仿真执行" badge={String(activeExecutionTasks.length)} active={view === 'running'} onClick={() => setView('running')} />

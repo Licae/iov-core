@@ -681,7 +681,7 @@ export const RequirementsPage = ({
 
                 <div>
                   <label className="text-sm font-bold text-text-secondary mb-2 block">适用资产（多选）</label>
-                  <div className="max-h-36 overflow-y-auto rounded-xl border border-border bg-bg p-4 grid grid-cols-1 gap-2">
+                  <div className="field-surface max-h-36 overflow-y-auto rounded-xl p-4 grid grid-cols-1 gap-2">
                     {assets.map((item) => (
                       <label key={item.id} className="flex items-start gap-2 text-sm">
                         <input type="checkbox" checked={draft.asset_ids.includes(item.id)} onChange={() => toggleAssetId(item.id)} />
@@ -697,7 +697,7 @@ export const RequirementsPage = ({
 
                 <div>
                   <label className="text-sm font-bold text-text-secondary mb-2 block">关联测试用例</label>
-                  <div className="max-h-40 overflow-y-auto rounded-xl border border-border bg-bg p-4 grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <div className="field-surface max-h-40 overflow-y-auto rounded-xl p-4 grid grid-cols-1 md:grid-cols-2 gap-2">
                     {testCases.map((item) => (
                       <label key={item.id} className="flex items-start gap-2 text-sm">
                         <input type="checkbox" checked={draft.case_ids.includes(item.id)} onChange={() => toggleCaseId(item.id)} />

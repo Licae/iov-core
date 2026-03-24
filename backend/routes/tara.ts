@@ -11,6 +11,15 @@ type TaraRouteDeps = {
   db: any;
 };
 
+type TaraDetailPayload = {
+  schema?: string;
+  damageScenario?: string;
+  threatScenario?: string;
+  attackPath?: string;
+  threatMethod?: string;
+  damageMethod?: string;
+};
+
 const parseIdArray = (value: unknown) =>
   Array.from(
     new Set(
@@ -25,6 +34,44 @@ const parseCsvIds = (value?: string | null) =>
     .split(",")
     .map((item) => Number(item.trim()))
     .filter((item) => Number.isInteger(item) && item > 0);
+
+const parseTaraDetailPayload = (raw: unknown): TaraDetailPayload | null => {
+  if (!raw) return null;
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as TaraDetailPayload;
+  }
+  if (typeof raw !== "string") return null;
+  const text = raw.trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as TaraDetailPayload;
+  } catch {
+    return null;
+  }
+};
+
+const validateTaraDetailPayload = (raw: unknown) => {
+  const detail = parseTaraDetailPayload(raw);
+  if (!detail || !/^tara-v\d+$/i.test(String(detail.schema || ""))) {
+    return { valid: false, error: "description 需包含有效的 TARA 结构化 payload（schema: tara-vX）。" };
+  }
+  const requiredFieldMap: Array<[keyof TaraDetailPayload, string]> = [
+    ["damageScenario", "损害场景"],
+    ["threatScenario", "威胁场景"],
+    ["attackPath", "攻击路径"],
+    ["threatMethod", "威胁方法(TM)"],
+    ["damageMethod", "损害方法(DM)"],
+  ];
+  const missingFields = requiredFieldMap
+    .filter(([field]) => String(detail[field] || "").trim().length === 0)
+    .map(([, label]) => label);
+  if (missingFields.length > 0) {
+    return { valid: false, error: `TARA 结构化字段缺失：${missingFields.join("、")}。` };
+  }
+  return { valid: true, error: "" };
+};
 
 export const registerTaraRoutes = (app: Express, deps: TaraRouteDeps) => {
   const { db } = deps;
@@ -54,7 +101,7 @@ export const registerTaraRoutes = (app: Express, deps: TaraRouteDeps) => {
           WHERE tctl.tara_id = t.id
         ) AS linked_test_case_ids
       FROM tara_items t
-      ORDER BY t.created_at DESC, t.id DESC
+      ORDER BY t.threat_key ASC, t.id ASC
     `).all();
 
     const normalized = rows.map((row: any) => ({
@@ -72,8 +119,13 @@ export const registerTaraRoutes = (app: Express, deps: TaraRouteDeps) => {
     const threatKey = String(req.body?.threat_key || "").trim();
     const title = String(req.body?.title || "").trim();
     const nextStatus = String(req.body?.status || "OPEN").trim() || "OPEN";
+    const nextDescription = String(req.body?.description || "").trim();
     if (!threatKey || !title) {
       return res.status(400).json({ error: "threat_key and title are required" });
+    }
+    const validation = validateTaraDetailPayload(nextDescription);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
     }
     if (isTaraMitigatedStatus(nextStatus)) {
       return res.status(409).json({ error: "新建TARA尚未关联需求，不允许直接标记为已缓解。" });
@@ -93,7 +145,7 @@ export const registerTaraRoutes = (app: Express, deps: TaraRouteDeps) => {
       String(req.body?.impact || "").trim(),
       String(req.body?.likelihood || "").trim(),
       String(req.body?.mitigation || "").trim(),
-      String(req.body?.description || "").trim(),
+      nextDescription,
     );
 
     const taraId = Number(info.lastInsertRowid);
@@ -115,8 +167,13 @@ export const registerTaraRoutes = (app: Express, deps: TaraRouteDeps) => {
     const threatKey = String(req.body?.threat_key ?? existing.threat_key ?? "").trim();
     const title = String(req.body?.title ?? existing.title ?? "").trim();
     const nextStatus = String(req.body?.status ?? existing.status ?? "OPEN").trim() || "OPEN";
+    const nextDescription = String(req.body?.description ?? existing.description ?? "").trim();
     if (!threatKey || !title) {
       return res.status(400).json({ error: "threat_key and title are required" });
+    }
+    const validation = validateTaraDetailPayload(nextDescription);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
     }
     try {
       assertTaraMitigationIntegrity(db, taraId, nextStatus);
@@ -149,7 +206,7 @@ export const registerTaraRoutes = (app: Express, deps: TaraRouteDeps) => {
       String(req.body?.impact ?? existing.impact ?? "").trim(),
       String(req.body?.likelihood ?? existing.likelihood ?? "").trim(),
       String(req.body?.mitigation ?? existing.mitigation ?? "").trim(),
-      String(req.body?.description ?? existing.description ?? "").trim(),
+      nextDescription,
       taraId,
     );
     markTaraChangeImpact(db, taraId, "TARA内容变更后待复验");

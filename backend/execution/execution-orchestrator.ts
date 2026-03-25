@@ -220,7 +220,9 @@ export class ExecutionOrchestrator {
         eti.id,
         eti.test_case_id,
         eti.sort_order,
+        eti.status,
         tc.title,
+        tc.type as case_type,
         tc.protocol,
         tc.category,
         tc.description,
@@ -241,7 +243,7 @@ export class ExecutionOrchestrator {
       JOIN test_cases tc ON tc.id = eti.test_case_id
       LEFT JOIN execution_tasks et ON et.id = eti.task_id
       LEFT JOIN assets a ON a.id = et.asset_id
-      WHERE eti.task_id = ?
+      WHERE eti.task_id = ? AND UPPER(COALESCE(eti.status, 'PENDING')) IN ('PENDING', 'QUEUED')
       ORDER BY eti.sort_order ASC, eti.id ASC
     `).all(taskId) as Array<Record<string, any>>;
 
@@ -285,6 +287,8 @@ export class ExecutionOrchestrator {
     const executeSequentially = async () => {
       for (let index = 0; index < items.length; index += 1) {
         const item = items[index];
+        const isManualCase = String(item.case_type || "").trim().toLowerCase() === "manual" ||
+          String(item.executor_type || "").trim().toLowerCase() === "manual";
         const latestTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as { status: ExecutionStatus } | undefined;
         if (!latestTask || latestTask.status === EXECUTION_STATUS.CANCELLED) {
           break;
@@ -309,6 +313,18 @@ export class ExecutionOrchestrator {
           type: "EXECUTION_TASK_UPDATED",
           task: this.decorateTaskRetryMeta(this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId)),
         });
+        if (isManualCase) {
+          this.db.prepare("UPDATE execution_tasks SET executor = ? WHERE id = ?").run("manual", taskId);
+          this.broadcast({
+            type: "EXECUTION_TASK_MANUAL_REQUIRED",
+            taskId,
+            testCaseId: item.test_case_id,
+            itemId: item.id,
+            title: item.title,
+          });
+          return;
+        }
+
         const refreshedTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId);
         const outcome = await this.executionRunner.runWithPreflight(
           refreshedTask,
@@ -411,6 +427,9 @@ export class ExecutionOrchestrator {
     } catch (error) {
       console.error("Execution task failed:", error);
       completeTask(EXECUTION_STATUS.COMPLETED, error instanceof Error ? error.message : "Task failed");
+    } finally {
+      this.activeTaskRuns.delete(taskId);
+      this.activeTaskChildren.delete(taskId);
     }
   }
 }

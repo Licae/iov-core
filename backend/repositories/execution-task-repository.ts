@@ -82,8 +82,11 @@ export class ExecutionTaskRepository {
       SELECT
         eti.*,
         tc.title,
+        tc.type as case_type,
         tc.category,
         tc.protocol,
+        tc.steps,
+        tc.executor_type,
         tc.test_tool,
         tc.test_input,
         tc.expected_result,
@@ -151,8 +154,8 @@ export class ExecutionTaskRepository {
 
   insertExecutionTaskItems(taskId: number, testCaseIds: number[]) {
     const insertItem = this.db.prepare(`
-      INSERT INTO execution_task_items (task_id, test_case_id, sort_order)
-      VALUES (?, ?, ?)
+      INSERT INTO execution_task_items (task_id, test_case_id, sort_order, status)
+      VALUES (?, ?, ?, 'PENDING')
     `);
     testCaseIds.forEach((id, index) => insertItem.run(taskId, id, index + 1));
   }

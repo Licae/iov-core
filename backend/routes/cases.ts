@@ -3,6 +3,7 @@ import {
   markTestCaseChangeImpact,
   removeEntityReverificationTodos,
 } from "../services/traceability-governance";
+import { normalizeAndValidateTestCasePayload, type NormalizedTestCasePayload } from "../services/test-case-quality";
 
 type CaseRouteDeps = {
   db: any;
@@ -132,31 +133,35 @@ export const registerCaseRoutes = (app: Express, deps: CaseRouteDeps) => {
   });
 
   app.post("/api/test-cases", (req, res) => {
-    const { title, category, security_domain, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec, required_inputs, default_runtime_inputs } = req.body;
+    const normalized = normalizeAndValidateTestCasePayload(req.body, { source: "create" });
+    if (normalized.ok === false) {
+      return res.status(400).json({ error: normalized.error });
+    }
+    const payload = normalized.value;
     const info = db.prepare(
       `INSERT INTO test_cases (
         title, category, security_domain, type, protocol, description, steps, test_input, test_tool,
         expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec, required_inputs, default_runtime_inputs
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
-      title,
-      category,
-      security_domain || "未分类",
-      type,
-      protocol,
-      description,
-      JSON.stringify(steps),
-      test_input,
-      test_tool,
-      expected_result,
-      automation_level,
-      executor_type || "python",
-      script_path || "",
-      command_template || "",
-      args_template || "",
-      Number(timeout_sec || 300),
-      JSON.stringify(Array.isArray(required_inputs) ? required_inputs : []),
-      JSON.stringify(default_runtime_inputs && typeof default_runtime_inputs === "object" ? default_runtime_inputs : {})
+      payload.title,
+      payload.category,
+      payload.security_domain,
+      payload.type,
+      payload.protocol,
+      payload.description,
+      JSON.stringify(payload.steps),
+      payload.test_input,
+      payload.test_tool,
+      payload.expected_result,
+      payload.automation_level,
+      payload.executor_type,
+      payload.script_path,
+      payload.command_template,
+      payload.args_template,
+      payload.timeout_sec,
+      JSON.stringify(payload.required_inputs),
+      JSON.stringify(payload.default_runtime_inputs)
     );
     const testCaseId = Number(info.lastInsertRowid);
     markTestCaseChangeImpact(db, testCaseId, "测试用例新建后待复验");
@@ -164,92 +169,97 @@ export const registerCaseRoutes = (app: Express, deps: CaseRouteDeps) => {
   });
 
   app.post("/api/test-cases/import", (req, res) => {
-    const { cases } = req.body;
+    const { cases } = req.body || {};
+    if (!Array.isArray(cases) || cases.length === 0) {
+      return res.status(400).json({ error: "导入内容为空" });
+    }
     const insert = db.prepare(`
       INSERT INTO test_cases (category, security_domain, title, test_input, test_tool, steps, expected_result, automation_level, type, protocol, description, executor_type, script_path, command_template, args_template, timeout_sec, required_inputs, default_runtime_inputs)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const insertedIds: number[] = [];
-    const transaction = db.transaction((items: any[]) => {
-      for (const item of items) {
-        const category = String(item.category || item.module || "未分类").trim();
-        const normalizedSteps = Array.isArray(item.steps)
-          ? item.steps.map((step: string) => String(step).trim()).filter(Boolean)
-          : String(item.steps || "")
-              .split(/\r?\n/)
-              .map((step: string) => step.trim())
-              .filter(Boolean);
-        const protocol = String(
-          item.protocol ||
-          (category === "CAN总线" ? "CAN" :
-          category.includes("蓝牙") ? "BLE" :
-          category === "车云通信" ? "Ethernet" :
-          category.includes("无线电") ? "WiFi" : "Other")
-        ).trim();
-        const type = String(item.type || (item.automation_level === "A" ? "Automated" : "Manual")).trim();
+    const items: NormalizedTestCasePayload[] = [];
+    for (let index = 0; index < cases.length; index += 1) {
+      const normalized = normalizeAndValidateTestCasePayload(cases[index], { source: "import", row: index + 1 });
+      if (normalized.ok === false) {
+        return res.status(400).json({ error: normalized.error });
+      }
+      items.push(normalized.value);
+    }
 
+    const insertedIds: number[] = [];
+    const transaction = db.transaction((normalizedCases: typeof items) => {
+      for (const item of normalizedCases) {
         const info = insert.run(
-          category,
-          item.security_domain || "未分类",
+          item.category,
+          item.security_domain,
           item.title,
-          item.test_input || "",
-          item.test_tool || "",
-          JSON.stringify(normalizedSteps),
-          item.expected_result || "",
-          item.automation_level || "B",
-          type,
-          protocol,
-          item.description || "",
-          item.executor_type || "python",
-          item.script_path || "",
-          item.command_template || "",
-          item.args_template || "",
-          Number(item.timeout_sec || 300),
-          JSON.stringify(Array.isArray(item.required_inputs) ? item.required_inputs : []),
-          JSON.stringify(item.default_runtime_inputs && typeof item.default_runtime_inputs === "object" ? item.default_runtime_inputs : {})
+          item.test_input,
+          item.test_tool,
+          JSON.stringify(item.steps),
+          item.expected_result,
+          item.automation_level,
+          item.type,
+          item.protocol,
+          item.description,
+          item.executor_type,
+          item.script_path,
+          item.command_template,
+          item.args_template,
+          item.timeout_sec,
+          JSON.stringify(item.required_inputs),
+          JSON.stringify(item.default_runtime_inputs)
         );
         insertedIds.push(Number(info.lastInsertRowid));
       }
     });
 
-    transaction(cases);
+    transaction(items);
     insertedIds.forEach((testCaseId) => {
       markTestCaseChangeImpact(db, testCaseId, "测试用例批量导入后待复验");
     });
-    res.json({ success: true, count: cases.length });
+    res.json({ success: true, count: items.length });
   });
 
   app.patch("/api/test-cases/:id", (req, res) => {
-    const { id } = req.params;
-    const { title, category, security_domain, type, protocol, description, steps, test_input, test_tool, expected_result, automation_level, executor_type, script_path, command_template, args_template, timeout_sec, required_inputs, default_runtime_inputs } = req.body;
+    const testCaseId = Number(req.params.id);
+    if (!Number.isInteger(testCaseId) || testCaseId <= 0) {
+      return res.status(400).json({ error: "Invalid test case id" });
+    }
+
+    const normalized = normalizeAndValidateTestCasePayload(req.body, { source: "update" });
+    if (normalized.ok === false) {
+      return res.status(400).json({ error: normalized.error });
+    }
+    const payload = normalized.value;
+
     db.prepare(
       `UPDATE test_cases
        SET title = ?, category = ?, security_domain = ?, type = ?, protocol = ?, description = ?, steps = ?, test_input = ?, test_tool = ?, expected_result = ?, automation_level = ?,
            executor_type = ?, script_path = ?, command_template = ?, args_template = ?, timeout_sec = ?, required_inputs = ?, default_runtime_inputs = ?
        WHERE id = ?`
     ).run(
-      title,
-      category,
-      security_domain || "未分类",
-      type,
-      protocol,
-      description,
-      JSON.stringify(steps),
-      test_input,
-      test_tool,
-      expected_result,
-      automation_level,
-      executor_type || "python",
-      script_path || "",
-      command_template || "",
-      args_template || "",
-      Number(timeout_sec || 300),
-      JSON.stringify(Array.isArray(required_inputs) ? required_inputs : []),
-      JSON.stringify(default_runtime_inputs && typeof default_runtime_inputs === "object" ? default_runtime_inputs : {}),
-      id
+      payload.title,
+      payload.category,
+      payload.security_domain,
+      payload.type,
+      payload.protocol,
+      payload.description,
+      JSON.stringify(payload.steps),
+      payload.test_input,
+      payload.test_tool,
+      payload.expected_result,
+      payload.automation_level,
+      payload.executor_type,
+      payload.script_path,
+      payload.command_template,
+      payload.args_template,
+      payload.timeout_sec,
+      JSON.stringify(payload.required_inputs),
+      JSON.stringify(payload.default_runtime_inputs),
+      testCaseId
     );
-    markTestCaseChangeImpact(db, Number(id), "测试用例内容变更后待复验");
+    markTestCaseChangeImpact(db, testCaseId, "测试用例内容变更后待复验");
     res.json({ success: true });
   });
 

@@ -5,6 +5,7 @@ import type {
   Asset,
   Defect,
   ExecutionTask,
+  ManualTaskItemResultPayload,
   RecentRun,
   Requirement,
   RequirementCoverageSnapshot,
@@ -210,6 +211,11 @@ export const useAppMutations = () => {
     }),
     retryTask: useMutation({
       mutationFn: (taskId: number) => apiClient.retryTask(taskId),
+      onSuccess: invalidateExecution,
+    }),
+    submitManualTaskResult: useMutation({
+      mutationFn: ({ taskId, itemId, body }: { taskId: number; itemId: number; body: ManualTaskItemResultPayload }) =>
+        apiClient.submitManualTaskResult(taskId, itemId, body),
       onSuccess: invalidateExecution,
     }),
     createCase: useMutation({

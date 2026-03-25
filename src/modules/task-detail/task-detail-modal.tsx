@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Activity, XCircle } from "lucide-react";
-import type { Dispatch, SetStateAction } from "react";
-import type { CanonicalTestResult, ExecutionStatus, ExecutionTaskDetail, StepExecutionResult } from "../../api/types";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import type { CanonicalTestResult, ExecutionStatus, ExecutionTaskDetail, ManualTaskItemResultPayload, StepExecutionResult } from "../../api/types";
 
 type TaskDetailModalProps = {
   selectedTaskDetail: ExecutionTaskDetail | null;
@@ -16,6 +16,8 @@ type TaskDetailModalProps = {
   formatDuration: (seconds: number) => string;
   parseStepResults: (value?: string | null) => StepExecutionResult[];
   getStepExecutionBadge: (step: StepExecutionResult) => { label: string; className: string };
+  manualSubmittingItemId: number | null;
+  submitManualTaskItemResult: (taskId: number, itemId: number, payload: ManualTaskItemResultPayload) => Promise<void>;
 };
 
 export const TaskDetailModal = (props: TaskDetailModalProps) => {
@@ -32,7 +34,54 @@ export const TaskDetailModal = (props: TaskDetailModalProps) => {
     formatDuration,
     parseStepResults,
     getStepExecutionBadge,
+    manualSubmittingItemId,
+    submitManualTaskItemResult,
   } = props;
+
+  const [manualDrafts, setManualDrafts] = useState<Record<number, {
+    result: CanonicalTestResult;
+    summary: string;
+    logs: string;
+    operator: string;
+  }>>({});
+
+  const parseCaseSteps = (value?: string | null) => {
+    if (!value) return [] as string[];
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed.map((step) => String(step || "").trim()).filter(Boolean);
+      if (typeof parsed === "string") {
+        return parsed.split(/\r?\n/).map((step) => step.trim()).filter(Boolean);
+      }
+    } catch {
+      return String(value).split(/\r?\n/).map((step) => step.trim()).filter(Boolean);
+    }
+    return [];
+  };
+
+  useEffect(() => {
+    if (!selectedTaskDetail) {
+      setManualDrafts({});
+      return;
+    }
+    setManualDrafts((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      selectedTaskDetail.items.forEach((item) => {
+        const isManual = String(item.case_type || "").trim().toLowerCase() === "manual";
+        const isWaitingManual = isManual && String(item.status || "").trim().toUpperCase() === "RUNNING" && !item.run_id;
+        if (!isWaitingManual || next[item.id]) return;
+        next[item.id] = {
+          result: "PASSED",
+          summary: "人工验证通过。",
+          logs: "",
+          operator: "Manual-Reviewer",
+        };
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [selectedTaskDetail]);
 
   return (
     <AnimatePresence>
@@ -136,13 +185,23 @@ export const TaskDetailModal = (props: TaskDetailModalProps) => {
                       当前任务暂无执行明细。
                     </div>
                   )}
-                  {selectedTaskDetail.items.map((item) => (
+                  {selectedTaskDetail.items.map((item) => {
+                    const isManualCase = String(item.case_type || "").trim().toLowerCase() === "manual";
+                    const isWaitingManual = isManualCase && normalizeExecutionStatus(item.status) === "RUNNING" && !item.run_id;
+                    const manualDraft = manualDrafts[item.id] || {
+                      result: "PASSED" as CanonicalTestResult,
+                      summary: "人工验证通过。",
+                      logs: "",
+                      operator: "Manual-Reviewer",
+                    };
+                    const manualSteps = parseCaseSteps(item.steps);
+                    return (
                     <div key={item.id} className="rounded-2xl border border-border bg-white/2 p-4 space-y-3">
                       <div className="flex items-start justify-between gap-4">
                         <div>
                           <div className="font-bold text-sm">{item.sort_order}. {item.title}</div>
                           <div className="text-[10px] text-muted uppercase font-bold mt-1">
-                            {item.category || "未分类"} • {item.protocol || "未标记协议"} • {item.test_tool || "未指定工具"}
+                            {item.category || "未分类"} • {item.protocol || "未标记协议"} • {item.test_tool || "未指定工具"} • {isManualCase ? "手动用例" : "自动用例"}
                           </div>
                         </div>
                         <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
@@ -233,8 +292,104 @@ export const TaskDetailModal = (props: TaskDetailModalProps) => {
                           ))}
                         </div>
                       )}
+
+                      {isWaitingManual && (
+                        <div className="rounded-xl border border-accent/40 bg-accent/5 p-3 space-y-3">
+                          <div className="text-[10px] text-accent uppercase font-bold">人工执行提交</div>
+                          {manualSteps.length > 0 && (
+                            <div className="rounded-lg border border-border bg-black/10 px-3 py-2">
+                              <div className="text-[10px] text-muted uppercase font-bold mb-1">建议执行步骤</div>
+                              <div className="space-y-1 text-xs text-text-secondary">
+                                {manualSteps.map((step, index) => (
+                                  <div key={`${item.id}-manual-step-${index}`}>{index + 1}. {step}</div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                            <div>
+                              <div className="text-[10px] text-muted uppercase font-bold mb-1">执行结果</div>
+                              <select
+                                value={manualDraft.result}
+                                onChange={(event) => {
+                                  const nextResult = event.target.value as CanonicalTestResult;
+                                  setManualDrafts((prev) => ({
+                                    ...prev,
+                                    [item.id]: { ...manualDraft, result: nextResult },
+                                  }));
+                                }}
+                                className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
+                              >
+                                <option value="PASSED">PASSED</option>
+                                <option value="FAILED">FAILED</option>
+                                <option value="BLOCKED">BLOCKED</option>
+                                <option value="ERROR">ERROR</option>
+                              </select>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-muted uppercase font-bold mb-1">执行人</div>
+                              <input
+                                value={manualDraft.operator}
+                                onChange={(event) => {
+                                  const nextOperator = event.target.value;
+                                  setManualDrafts((prev) => ({
+                                    ...prev,
+                                    [item.id]: { ...manualDraft, operator: nextOperator },
+                                  }));
+                                }}
+                                className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
+                                placeholder="Manual-Reviewer"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] text-muted uppercase font-bold mb-1">人工结论</div>
+                            <textarea
+                              value={manualDraft.summary}
+                              onChange={(event) => {
+                                const nextSummary = event.target.value;
+                                setManualDrafts((prev) => ({
+                                  ...prev,
+                                  [item.id]: { ...manualDraft, summary: nextSummary },
+                                }));
+                              }}
+                              className="w-full h-20 bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
+                              placeholder="填写人工验证结论。"
+                            />
+                          </div>
+                          <div>
+                            <div className="text-[10px] text-muted uppercase font-bold mb-1">执行日志（可选）</div>
+                            <textarea
+                              value={manualDraft.logs}
+                              onChange={(event) => {
+                                const nextLogs = event.target.value;
+                                setManualDrafts((prev) => ({
+                                  ...prev,
+                                  [item.id]: { ...manualDraft, logs: nextLogs },
+                                }));
+                              }}
+                              className="w-full h-16 bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
+                              placeholder="可填写人工命令输出、截图编号、问题说明。"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            disabled={manualSubmittingItemId === item.id || !manualDraft.summary.trim()}
+                            onClick={() => submitManualTaskItemResult(selectedTaskDetail.task.id, item.id, {
+                              result: manualDraft.result,
+                              summary: manualDraft.summary.trim(),
+                              logs: manualDraft.logs.trim(),
+                              operator: manualDraft.operator.trim() || "Manual-Reviewer",
+                            })}
+                            className="px-4 py-2 rounded-lg bg-accent text-white text-xs font-semibold disabled:opacity-50"
+                          >
+                            {manualSubmittingItemId === item.id ? "提交中..." : "提交人工结果并继续"}
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>

@@ -1,5 +1,5 @@
 import type { Express } from "express";
-import { validateBaselineSuiteCases } from "../services/traceability-governance";
+import { validateBaselineSuiteCases, writebackRequirementSatisfactionFromRun } from "../services/traceability-governance";
 
 type TaskRouteDeps = {
   db: any;
@@ -29,6 +29,123 @@ export const registerTaskRoutes = (app: Express, deps: TaskRouteDeps) => {
     enqueueExecutionTask,
     getWorkerState,
   } = deps;
+  const normalizeManualResult = (value: unknown) => {
+    const normalized = String(value || "").trim().toUpperCase();
+    if (normalized === "PASSED" || normalized === "FAILED" || normalized === "BLOCKED" || normalized === "ERROR") {
+      return normalized as "PASSED" | "FAILED" | "BLOCKED" | "ERROR";
+    }
+    return null;
+  };
+
+  const normalizeFailureCategory = (
+    value: unknown,
+    result: "PASSED" | "FAILED" | "BLOCKED" | "ERROR",
+  ) => {
+    const normalized = String(value || "").trim().toUpperCase();
+    if (normalized === "ENVIRONMENT" || normalized === "PERMISSION" || normalized === "SCRIPT" || normalized === "NONE") {
+      return normalized as "ENVIRONMENT" | "PERMISSION" | "SCRIPT" | "NONE";
+    }
+    if (result === "PASSED") return "NONE" as const;
+    if (result === "BLOCKED") return "ENVIRONMENT" as const;
+    return "SCRIPT" as const;
+  };
+
+  const normalizeStepResult = (value: unknown) => {
+    const normalized = String(value || "").trim().toUpperCase();
+    if (normalized === "PASSED" || normalized === "FAILED" || normalized === "BLOCKED" || normalized === "ERROR" || normalized === "RUNNING" || normalized === "SKIPPED") {
+      return normalized as "PASSED" | "FAILED" | "BLOCKED" | "ERROR" | "RUNNING" | "SKIPPED";
+    }
+    return "ERROR" as const;
+  };
+
+  const buildManualStepResults = (
+    rawSteps: unknown,
+    fallbackResult: "PASSED" | "FAILED" | "BLOCKED" | "ERROR",
+    fallbackSummary: string,
+  ) => {
+    const now = new Date().toISOString();
+    if (Array.isArray(rawSteps) && rawSteps.length > 0) {
+      return rawSteps
+        .map((raw, index) => {
+          if (!raw || typeof raw !== "object") return null;
+          const step = raw as Record<string, unknown>;
+          const stepResult = normalizeStepResult(step.result ?? fallbackResult);
+          return {
+            name: String(step.name || `人工步骤 ${index + 1}`).trim() || `人工步骤 ${index + 1}`,
+            result: stepResult,
+            logs: String(step.logs || "").trim(),
+            command: String(step.command || "manual://operator-review").trim(),
+            command_result: normalizeStepResult(step.command_result ?? stepResult),
+            output: String(step.output || "").trim(),
+            security_assessment: String(step.security_assessment || "").trim(),
+            exit_code: typeof step.exit_code === "number" ? step.exit_code : null,
+            stdout: String(step.stdout || "").trim(),
+            stderr: String(step.stderr || "").trim(),
+            timestamp: String(step.timestamp || now),
+            conclusion: String(step.conclusion || step.security_assessment || step.logs || "").trim(),
+          };
+        })
+        .filter(Boolean);
+    }
+    return [
+      {
+        name: "人工执行结论",
+        result: fallbackResult,
+        logs: fallbackSummary,
+        command: "manual://operator-review",
+        command_result: fallbackResult,
+        output: fallbackSummary,
+        security_assessment: fallbackSummary,
+        exit_code: fallbackResult === "PASSED" ? 0 : 1,
+        stdout: fallbackResult === "PASSED" ? fallbackSummary : "",
+        stderr: fallbackResult === "PASSED" ? "" : fallbackSummary,
+        timestamp: now,
+        conclusion: fallbackSummary,
+      },
+    ];
+  };
+
+  const refreshTaskCountersAndFailure = (taskId: number) => {
+    const stats = db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN result = 'PASSED' THEN 1 ELSE 0 END) as passed,
+        SUM(CASE WHEN result IN ('FAILED', 'ERROR') THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN result = 'BLOCKED' THEN 1 ELSE 0 END) as blocked
+      FROM execution_task_items
+      WHERE task_id = ?
+    `).get(taskId) as { total?: number; completed?: number; passed?: number; failed?: number; blocked?: number };
+
+    db.prepare(`
+      UPDATE execution_tasks
+      SET total_items = ?,
+          completed_items = ?,
+          passed_items = ?,
+          failed_items = ?,
+          blocked_items = ?
+      WHERE id = ?
+    `).run(
+      Number(stats.total || 0),
+      Number(stats.completed || 0),
+      Number(stats.passed || 0),
+      Number(stats.failed || 0),
+      Number(stats.blocked || 0),
+      taskId,
+    );
+
+    const items = db.prepare(`
+      SELECT result, failure_category
+      FROM execution_task_items
+      WHERE task_id = ?
+      ORDER BY sort_order DESC, id DESC
+    `).all(taskId) as Array<{ result?: string | null; failure_category?: string | null }>;
+
+    const activeFailure = items.find((item) => String(item.result || "").trim().toUpperCase() !== "PASSED");
+    const fallbackCategory = activeFailure ? normalizeFailureCategory(activeFailure.failure_category, normalizeManualResult(activeFailure.result) || "ERROR") : "NONE";
+    db.prepare("UPDATE execution_tasks SET failure_category = ? WHERE id = ?").run(fallbackCategory, taskId);
+    return fallbackCategory;
+  };
 
   app.get("/api/tasks", (req, res) => {
     res.json(listExecutionTasks());
@@ -307,6 +424,192 @@ export const registerTaskRoutes = (app: Express, deps: TaskRouteDeps) => {
       res.json({ success: true, id: cloned.taskId });
     } catch (error) {
       return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to retry task" });
+    }
+  });
+
+  app.post("/api/tasks/:id/items/:itemId/manual-result", async (req, res) => {
+    try {
+      const taskId = Number(req.params.id);
+      const itemId = Number(req.params.itemId);
+      if (!Number.isInteger(taskId) || taskId <= 0 || !Number.isInteger(itemId) || itemId <= 0) {
+        return res.status(400).json({ error: "Invalid task/item id" });
+      }
+
+      const task = db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as { id: number; status: string; stop_on_failure?: number } | undefined;
+      if (!task) {
+        return res.status(404).json({ error: "Task not found" });
+      }
+      if (String(task.status || "").trim().toUpperCase() === "CANCELLED") {
+        return res.status(409).json({ error: "Task is cancelled" });
+      }
+
+      const item = db.prepare(`
+        SELECT
+          eti.*,
+          tc.title,
+          tc.type as case_type,
+          tc.executor_type
+        FROM execution_task_items eti
+        JOIN test_cases tc ON tc.id = eti.test_case_id
+        WHERE eti.id = ? AND eti.task_id = ?
+      `).get(itemId, taskId) as {
+        id: number;
+        task_id: number;
+        test_case_id: number;
+        sort_order: number;
+        status: string;
+        run_id?: number | null;
+        started_at?: string | null;
+        title: string;
+        case_type?: string | null;
+        executor_type?: string | null;
+      } | undefined;
+      if (!item) {
+        return res.status(404).json({ error: "Task item not found" });
+      }
+
+      const isManualCase = String(item.case_type || "").trim().toLowerCase() === "manual" ||
+        String(item.executor_type || "").trim().toLowerCase() === "manual";
+      if (!isManualCase) {
+        return res.status(400).json({ error: "Only manual test cases support manual result submission" });
+      }
+      if (String(item.status || "").trim().toUpperCase() === "COMPLETED" && Number(item.run_id || 0) > 0) {
+        return res.status(409).json({ error: "Manual result has already been submitted" });
+      }
+      if (!["RUNNING", "PENDING"].includes(String(item.status || "").trim().toUpperCase())) {
+        return res.status(409).json({ error: "Current task item is not waiting for manual result" });
+      }
+
+      const result = normalizeManualResult(req.body?.result);
+      if (!result) {
+        return res.status(400).json({ error: "result must be one of PASSED/FAILED/BLOCKED/ERROR" });
+      }
+      const summary = String(req.body?.summary || "").trim() || "人工执行已提交结论。";
+      const logs = String(req.body?.logs || "").trim() || summary;
+      const operator = String(req.body?.operator || "").trim() || "Manual-Reviewer";
+      const failureCategory = normalizeFailureCategory(req.body?.failure_category, result);
+      const stepResults = buildManualStepResults(req.body?.step_results, result, summary);
+
+      const duration = Number(
+        (
+          db.prepare(`
+            SELECT
+              CASE
+                WHEN ? IS NULL OR TRIM(?) = '' THEN 1
+                ELSE MAX(1, CAST((julianday(CURRENT_TIMESTAMP) - julianday(?)) * 86400 AS INTEGER))
+              END AS duration
+          `).get(item.started_at || null, item.started_at || null, item.started_at || null) as { duration?: number } | undefined
+        )?.duration || 1
+      );
+      let shouldResumeTask = false;
+
+      const transaction = db.transaction(() => {
+        const runInfo = db.prepare(`
+          INSERT INTO test_runs (test_case_id, result, logs, summary, step_results, duration, executed_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          item.test_case_id,
+          result,
+          logs,
+          summary,
+          JSON.stringify(stepResults),
+          duration,
+          operator,
+        );
+        const runId = Number(runInfo.lastInsertRowid);
+
+        writebackRequirementSatisfactionFromRun(db, {
+          runId,
+          testCaseId: item.test_case_id,
+          result,
+        });
+
+        db.prepare("UPDATE test_cases SET status = ? WHERE id = ?").run(result, item.test_case_id);
+        db.prepare(`
+          UPDATE execution_task_items
+          SET status = 'COMPLETED',
+              result = ?,
+              failure_category = ?,
+              run_id = ?,
+              started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+              finished_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(result, failureCategory, runId, item.id);
+
+        if (Boolean(task.stop_on_failure) && (result === "FAILED" || result === "ERROR")) {
+          db.prepare(`
+            UPDATE execution_task_items
+            SET status = 'CANCELLED',
+                finished_at = CURRENT_TIMESTAMP
+            WHERE task_id = ? AND status = 'PENDING' AND sort_order > ?
+          `).run(taskId, item.sort_order);
+          const taskFailureCategory = refreshTaskCountersAndFailure(taskId);
+          db.prepare(`
+            UPDATE execution_tasks
+            SET status = 'COMPLETED',
+                current_test_case_id = NULL,
+                current_item_label = NULL,
+                finished_at = CURRENT_TIMESTAMP,
+                error_message = ?,
+                failure_category = ?
+            WHERE id = ?
+          `).run(`Task stopped after failure on ${item.title}`, taskFailureCategory, taskId);
+          return;
+        }
+
+        const nextPending = db.prepare(`
+          SELECT eti.test_case_id, tc.title
+          FROM execution_task_items eti
+          JOIN test_cases tc ON tc.id = eti.test_case_id
+          WHERE eti.task_id = ? AND eti.status = 'PENDING'
+          ORDER BY eti.sort_order ASC, eti.id ASC
+          LIMIT 1
+        `).get(taskId) as { test_case_id: number; title: string } | undefined;
+
+        const taskFailureCategory = refreshTaskCountersAndFailure(taskId);
+        if (nextPending) {
+          db.prepare(`
+            UPDATE execution_tasks
+            SET status = 'PENDING',
+                current_test_case_id = ?,
+                current_item_label = ?,
+                finished_at = NULL,
+                error_message = NULL,
+                failure_category = ?
+            WHERE id = ?
+          `).run(nextPending.test_case_id, nextPending.title, taskFailureCategory, taskId);
+          shouldResumeTask = true;
+          return;
+        }
+
+        db.prepare(`
+          UPDATE execution_tasks
+          SET status = 'COMPLETED',
+              current_test_case_id = NULL,
+              current_item_label = NULL,
+              finished_at = CURRENT_TIMESTAMP,
+              error_message = NULL,
+              failure_category = ?
+          WHERE id = ?
+        `).run(taskFailureCategory, taskId);
+      });
+
+      transaction();
+
+      if (shouldResumeTask) {
+        await Promise.resolve(enqueueExecutionTask(taskId));
+      }
+
+      const detail = getExecutionTaskDetail(taskId);
+      return res.json({
+        success: true,
+        taskId,
+        itemId,
+        resumed: shouldResumeTask,
+        detail,
+      });
+    } catch (error) {
+      return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to submit manual result" });
     }
   });
 

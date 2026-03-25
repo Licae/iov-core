@@ -221,8 +221,11 @@ export interface ExecutionTaskDetailItem {
   started_at?: string | null;
   finished_at?: string | null;
   title: string;
+  case_type?: "Automated" | "Manual" | string | null;
   category?: string | null;
   protocol?: string | null;
+  steps?: string | null;
+  executor_type?: string | null;
   test_tool?: string | null;
   test_input?: string | null;
   expected_result?: string | null;
@@ -257,6 +260,15 @@ export interface StepExecutionResult {
   stderr?: string;
   timestamp?: string;
   conclusion?: string;
+}
+
+export interface ManualTaskItemResultPayload {
+  result: CanonicalTestResult;
+  summary?: string;
+  logs?: string;
+  failure_category?: FailureCategory;
+  operator?: string;
+  step_results?: StepExecutionResult[];
 }
 
 export interface Defect {

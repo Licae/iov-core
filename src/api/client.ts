@@ -3,6 +3,7 @@ import type {
   Defect,
   ExecutionTask,
   ExecutionTaskDetail,
+  ManualTaskItemResultPayload,
   RecentRun,
   ReverificationTodo,
   Requirement,
@@ -78,6 +79,11 @@ export const apiClient = {
     request<{ id: number; success: boolean }>("/api/test-runs", { method: "POST", body }),
   cancelTask: (taskId: number) => request<{ success: boolean }>(`/api/tasks/${taskId}/cancel`, { method: "PATCH" }),
   retryTask: (taskId: number) => request<{ success: boolean; id: number }>(`/api/tasks/${taskId}/retry`, { method: "POST" }),
+  submitManualTaskResult: (taskId: number, itemId: number, body: ManualTaskItemResultPayload) =>
+    request<{ success: boolean; taskId: number; itemId: number; resumed: boolean; detail?: ExecutionTaskDetail }>(
+      `/api/tasks/${taskId}/items/${itemId}/manual-result`,
+      { method: "POST", body },
+    ),
 
   createCase: (body: Record<string, unknown>) => request<{ id: number }>("/api/test-cases", { method: "POST", body }),
   updateCase: (testCaseId: number, body: Record<string, unknown>) => request<{ success: boolean }>(`/api/test-cases/${testCaseId}`, { method: "PATCH", body }),

@@ -22,6 +22,7 @@ import type {
   ExecutionTask,
   ExecutionTaskDetail,
   FailureCategory,
+  ManualTaskItemResultPayload,
   RecentRun,
   Stats,
   StepExecutionResult,
@@ -96,6 +97,108 @@ const DEFAULT_RUNTIME_INPUT_SUGGESTIONS: Record<string, string> = {
   telnet_port: '23',
   ftp_port: '21',
   tls_port: '443',
+};
+
+const normalizeStepsText = (value: string) => {
+  const split = value
+    .replace(/[；;]+/g, '\n')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return split
+    .map((step) => step
+      .replace(/^步骤\s*\d+\s*[：:、.)-]?\s*/i, '')
+      .replace(/^\d+\s*[：:、.)-]\s*/, '')
+      .trim(),
+    )
+    .filter(Boolean)
+    .map((content, index) => `步骤${index + 1}：${content}`);
+};
+
+const hasDeterministicExpectedResult = (value: string) => {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length < 8) return false;
+  const keywords = ['通过', '失败', '拒绝', '允许', '禁止', '拦截', '判定', '告警', 'must', 'pass', 'fail', 'deny', 'allow', 'blocked'];
+  return keywords.some((keyword) => normalized.includes(keyword.toLowerCase()));
+};
+
+const buildManualCaseTemplate = (params: { title: string; protocol: string; testTool: string }) => {
+  const target = params.title.trim() || '该测试场景';
+  const protocolHint = [params.protocol.trim(), params.testTool.trim()].filter(Boolean).join(' / ');
+  const description = `手动验证${target}，通过人工操作与观察记录评估安全控制策略是否有效。`;
+  const testInput = '测试资产连接地址（自动注入）；人工操作记录；必要测试样本。';
+  const expectedResult = `${target}执行后，未授权或异常行为应被拒绝/拦截，并可明确判定通过或失败。`;
+  const steps = [
+    '步骤1：准备测试环境并确认前置条件（资产在线、权限与连接可用）。',
+    `步骤2：按测试目标执行人工操作并记录关键现象与返回信息${protocolHint ? `（参考协议/工具：${protocolHint}）` : '。'}`,
+    '步骤3：依据判定标准输出通过/失败结论并补充证据说明。',
+  ];
+  return { description, testInput, expectedResult, steps };
+};
+
+const getFormControl = <T extends HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(form: HTMLFormElement, name: string) => {
+  const field = form.elements.namedItem(name);
+  return field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement || field instanceof HTMLSelectElement
+    ? (field as T)
+    : null;
+};
+
+const applyManualTemplateToForm = (form: HTMLFormElement) => {
+  const titleField = getFormControl<HTMLInputElement>(form, 'title');
+  const protocolField = getFormControl<HTMLSelectElement>(form, 'protocol');
+  const toolField = getFormControl<HTMLInputElement>(form, 'test_tool');
+  const descriptionField = getFormControl<HTMLTextAreaElement>(form, 'description');
+  const inputField = getFormControl<HTMLInputElement | HTMLTextAreaElement>(form, 'test_input');
+  const expectedField = getFormControl<HTMLTextAreaElement>(form, 'expected_result');
+  const stepsField = getFormControl<HTMLTextAreaElement>(form, 'steps');
+  const automationField = getFormControl<HTMLSelectElement>(form, 'automation_level');
+  const executorField = getFormControl<HTMLSelectElement>(form, 'executor_type');
+  const scriptField = getFormControl<HTMLInputElement>(form, 'script_path');
+
+  const template = buildManualCaseTemplate({
+    title: titleField?.value || '',
+    protocol: protocolField?.value || '',
+    testTool: toolField?.value || '',
+  });
+
+  if (toolField && !toolField.value.trim()) toolField.value = '人工检查';
+  if (descriptionField && !descriptionField.value.trim()) descriptionField.value = template.description;
+  if (inputField && !inputField.value.trim()) inputField.value = template.testInput;
+  if (expectedField && !expectedField.value.trim()) expectedField.value = template.expectedResult;
+  if (stepsField && normalizeStepsText(stepsField.value).length < 2) stepsField.value = template.steps.join('\n');
+  if (automationField) automationField.value = automationField.value === 'A' ? 'B' : automationField.value || 'B';
+  if (executorField) executorField.value = 'manual';
+  if (scriptField) scriptField.value = '';
+};
+
+const validateCaseQualityDraft = (draft: {
+  securityDomain: string;
+  steps: string[];
+  expectedResult: string;
+  type: string;
+  executorType: string;
+  scriptPath: string;
+}) => {
+  if (!draft.securityDomain || draft.securityDomain === '未分类') {
+    return '安全分类不能为空，且不能为“未分类”';
+  }
+  if (draft.steps.length < 2) {
+    return '测试步骤至少需要 2 步';
+  }
+  if (!hasDeterministicExpectedResult(draft.expectedResult)) {
+    return '预期结果不可判定，请明确通过/失败或允许/拒绝判定标准';
+  }
+  if (draft.type === 'Manual' && draft.executorType !== 'manual') {
+    return '手动用例执行器必须为 manual';
+  }
+  if (draft.type === 'Automated' && draft.executorType === 'manual') {
+    return '自动化用例执行器不能为 manual';
+  }
+  if (draft.type === 'Automated' && !draft.scriptPath) {
+    return '自动化用例必须填写脚本路径';
+  }
+  return null;
 };
 
 const inferInputsFromScript = (scriptPath?: string, testTool?: string) => {
@@ -298,6 +401,7 @@ export default function App() {
     runCases: runCasesMutation,
     cancelTask: cancelTaskMutation,
     retryTask: retryTaskMutation,
+    submitManualTaskResult: submitManualTaskResultMutation,
     createCase: createCaseMutation,
     updateCase: updateCaseMutation,
     deleteCase: deleteCaseMutation,
@@ -350,6 +454,7 @@ export default function App() {
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [selectedTaskDetail, setSelectedTaskDetail] = useState<ExecutionTaskDetail | null>(null);
   const [isTaskDetailLoading, setIsTaskDetailLoading] = useState(false);
+  const [manualSubmittingItemId, setManualSubmittingItemId] = useState<number | null>(null);
   const [pingingAssetId, setPingingAssetId] = useState<number | null>(null);
   const [history, setHistory] = useState<TestRun[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
@@ -750,6 +855,25 @@ export default function App() {
     }
   };
 
+  const submitManualTaskItemResult = async (
+    taskId: number,
+    itemId: number,
+    payload: ManualTaskItemResultPayload,
+  ) => {
+    setManualSubmittingItemId(itemId);
+    try {
+      const response = await submitManualTaskResultMutation.mutateAsync({ taskId, itemId, body: payload });
+      addToast(response.resumed ? '人工结果已提交，任务继续执行。' : '人工结果已提交。', 'success');
+      await refreshExecutionData();
+      await fetchTaskDetail(taskId, false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '提交人工结果失败';
+      addToast(message, 'error');
+    } finally {
+      setManualSubmittingItemId(null);
+    }
+  };
+
   const analyzeDefect = async (defect: Defect) => {
     setAnalyzingDefectId(defect.id);
     try {
@@ -886,24 +1010,64 @@ export default function App() {
   const createTestCase = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const steps = (formData.get('steps') as string).split('\n').filter(s => s.trim());
-    const scriptPath = String(formData.get('script_path') || '').trim();
-    const testTool = String(formData.get('test_tool') || '').trim();
-    const required_inputs = resolveRuntimeInputs(scriptPath, testTool, null);
-    const default_runtime_inputs = collectDefaultRuntimeInputs(formData, required_inputs);
-    const newCase = {
-      title: formData.get('title'),
-      category: formData.get('category'),
-      security_domain: formData.get('security_domain') || '未分类',
-      type: formData.get('type'),
-      protocol: formData.get('protocol'),
-      description: formData.get('description'),
+    const type = String(formData.get('type') || 'Automated').trim() === 'Manual' ? 'Manual' : 'Automated';
+    const title = String(formData.get('title') || '').trim();
+    const protocol = String(formData.get('protocol') || '').trim();
+    const securityDomain = String(formData.get('security_domain') || '未分类').trim();
+    const testToolRaw = String(formData.get('test_tool') || '').trim();
+    let scriptPath = String(formData.get('script_path') || '').trim();
+    let description = String(formData.get('description') || '').trim();
+    let testInput = String(formData.get('test_input') || '').trim();
+    let expectedResult = String(formData.get('expected_result') || '').trim();
+    let steps = normalizeStepsText(String(formData.get('steps') || ''));
+
+    const manualTemplate = type === 'Manual'
+      ? buildManualCaseTemplate({ title, protocol, testTool: testToolRaw })
+      : null;
+
+    if (manualTemplate) {
+      description = description || manualTemplate.description;
+      testInput = testInput || manualTemplate.testInput;
+      expectedResult = expectedResult || manualTemplate.expectedResult;
+      if (steps.length < 2) {
+        steps = manualTemplate.steps;
+      }
+      scriptPath = '';
+    }
+
+    const testTool = testToolRaw || (type === 'Manual' ? '人工检查' : '');
+    const executorType = type === 'Manual' ? 'manual' : String(formData.get('executor_type') || 'python').trim();
+    const automationLevelRaw = String(formData.get('automation_level') || '').trim();
+    const automationLevel = type === 'Manual' && (!automationLevelRaw || automationLevelRaw === 'A') ? 'B' : automationLevelRaw;
+    const required_inputs = type === 'Manual' ? ['connection_address'] : resolveRuntimeInputs(scriptPath, testTool, null);
+    const default_runtime_inputs = type === 'Manual' ? {} : collectDefaultRuntimeInputs(formData, required_inputs);
+
+    const qualityError = validateCaseQualityDraft({
+      securityDomain,
       steps,
-      test_input: formData.get('test_input'),
-      test_tool: formData.get('test_tool'),
-      expected_result: formData.get('expected_result'),
-      automation_level: formData.get('automation_level'),
-      executor_type: formData.get('executor_type'),
+      expectedResult,
+      type,
+      executorType,
+      scriptPath,
+    });
+    if (qualityError) {
+      addToast(qualityError, 'error');
+      return;
+    }
+
+    const newCase = {
+      title,
+      category: formData.get('category'),
+      security_domain: securityDomain,
+      type,
+      protocol,
+      description,
+      steps,
+      test_input: testInput,
+      test_tool: testTool,
+      expected_result: expectedResult,
+      automation_level: automationLevel,
+      executor_type: executorType,
       script_path: scriptPath,
       command_template: '',
       args_template: '',
@@ -919,7 +1083,7 @@ export default function App() {
       setCreateScriptPath('');
       setCreateTestTool('');
     } catch (error) {
-      addToast('创建失败', 'error');
+      addToast(error instanceof Error ? error.message : '创建失败', 'error');
     }
   };
 
@@ -973,24 +1137,66 @@ export default function App() {
     e.preventDefault();
     if (!selectedTestCase) return;
     const formData = new FormData(e.currentTarget);
-    const steps = (formData.get('steps') as string).split('\n').filter(s => s.trim());
-    const scriptPath = String(formData.get('script_path') || '').trim();
-    const testTool = String(formData.get('test_tool') || '').trim();
-    const required_inputs = resolveRuntimeInputs(scriptPath, testTool, selectedTestCase.required_inputs);
-    const default_runtime_inputs = collectDefaultRuntimeInputs(formData, required_inputs);
-    const updatedCase = {
-      title: formData.get('title'),
-      category: formData.get('category'),
-      security_domain: formData.get('security_domain') || '未分类',
-      type: formData.get('type'),
-      protocol: formData.get('protocol'),
-      description: formData.get('description'),
+    const type = String(formData.get('type') || 'Automated').trim() === 'Manual' ? 'Manual' : 'Automated';
+    const title = String(formData.get('title') || '').trim();
+    const protocol = String(formData.get('protocol') || '').trim();
+    const securityDomain = String(formData.get('security_domain') || '未分类').trim();
+    const testToolRaw = String(formData.get('test_tool') || '').trim();
+    let scriptPath = String(formData.get('script_path') || '').trim();
+    let description = String(formData.get('description') || '').trim();
+    let testInput = String(formData.get('test_input') || '').trim();
+    let expectedResult = String(formData.get('expected_result') || '').trim();
+    let steps = normalizeStepsText(String(formData.get('steps') || ''));
+
+    const manualTemplate = type === 'Manual'
+      ? buildManualCaseTemplate({ title, protocol, testTool: testToolRaw })
+      : null;
+
+    if (manualTemplate) {
+      description = description || manualTemplate.description;
+      testInput = testInput || manualTemplate.testInput;
+      expectedResult = expectedResult || manualTemplate.expectedResult;
+      if (steps.length < 2) {
+        steps = manualTemplate.steps;
+      }
+      scriptPath = '';
+    }
+
+    const testTool = testToolRaw || (type === 'Manual' ? '人工检查' : '');
+    const executorType = type === 'Manual' ? 'manual' : String(formData.get('executor_type') || 'python').trim();
+    const automationLevelRaw = String(formData.get('automation_level') || '').trim();
+    const automationLevel = type === 'Manual' && (!automationLevelRaw || automationLevelRaw === 'A') ? 'B' : automationLevelRaw;
+    const required_inputs = type === 'Manual'
+      ? ['connection_address']
+      : resolveRuntimeInputs(scriptPath, testTool, selectedTestCase.required_inputs);
+    const default_runtime_inputs = type === 'Manual' ? {} : collectDefaultRuntimeInputs(formData, required_inputs);
+
+    const qualityError = validateCaseQualityDraft({
+      securityDomain,
       steps,
-      test_input: formData.get('test_input'),
-      test_tool: formData.get('test_tool'),
-      expected_result: formData.get('expected_result'),
-      automation_level: formData.get('automation_level'),
-      executor_type: formData.get('executor_type'),
+      expectedResult,
+      type,
+      executorType,
+      scriptPath,
+    });
+    if (qualityError) {
+      addToast(qualityError, 'error');
+      return;
+    }
+
+    const updatedCase = {
+      title,
+      category: formData.get('category'),
+      security_domain: securityDomain,
+      type,
+      protocol,
+      description,
+      steps,
+      test_input: testInput,
+      test_tool: testTool,
+      expected_result: expectedResult,
+      automation_level: automationLevel,
+      executor_type: executorType,
       script_path: scriptPath,
       command_template: '',
       args_template: '',
@@ -1013,7 +1219,7 @@ export default function App() {
       setSelectedTestCase(patchedCase);
       setShowEditModal(false);
     } catch (error) {
-      addToast('更新失败', 'error');
+      addToast(error instanceof Error ? error.message : '更新失败', 'error');
     }
   };
 
@@ -1021,6 +1227,10 @@ export default function App() {
     const lines = importText.split('\n').filter(l => l.includes('|'));
     if (lines.length < 3) return;
     const hasSecurityDomainColumn = lines[0].includes('安全分类');
+    if (!hasSecurityDomainColumn) {
+      addToast('导入模板缺少“安全分类”列，无法通过质量门禁', 'error');
+      return;
+    }
 
     // Skip header and separator
     const dataLines = lines.slice(2);
@@ -1162,7 +1372,7 @@ export default function App() {
       setShowImportModal(false);
       setImportText('');
     } catch (error) {
-      addToast('导入失败', 'error');
+      addToast(error instanceof Error ? error.message : '导入失败', 'error');
     }
   };
 
@@ -2233,7 +2443,21 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试类型</label>
-                    <select name="type" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
+                    <select
+                      name="type"
+                      className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none"
+                      onChange={(event) => {
+                        const form = event.currentTarget.form;
+                        if (!form) return;
+                        if (event.target.value === 'Manual') {
+                          applyManualTemplateToForm(form);
+                          setCreateScriptPath('');
+                        } else {
+                          const executorField = getFormControl<HTMLSelectElement>(form, 'executor_type');
+                          if (executorField?.value === 'manual') executorField.value = 'python';
+                        }
+                      }}
+                    >
                       <option value="Automated">自动化 (Automated)</option>
                       <option value="Manual">手动 (Manual)</option>
                     </select>
@@ -2277,6 +2501,7 @@ export default function App() {
                     <select name="executor_type" defaultValue="python" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
                       <option value="python">python</option>
                       <option value="shell">shell</option>
+                      <option value="manual">manual</option>
                     </select>
                   </div>
                   <div>
@@ -2764,6 +2989,8 @@ export default function App() {
         formatDuration={formatDuration}
         parseStepResults={parseStepResults}
         getStepExecutionBadge={getStepExecutionBadge}
+        manualSubmittingItemId={manualSubmittingItemId}
+        submitManualTaskItemResult={submitManualTaskItemResult}
       />
 
       <AnimatePresence>
@@ -2977,10 +3204,25 @@ export default function App() {
                           <div className="font-bold text-sm font-mono text-accent">{selectedTestCase.test_tool || '-'}</div>
                         )}
                       </div>
-                    <div className="p-4 rounded-xl bg-white/2 border border-border">
-                      <div className="text-[10px] text-muted uppercase font-bold mb-1">测试类型</div>
+                      <div className="p-4 rounded-xl bg-white/2 border border-border">
+                        <div className="text-[10px] text-muted uppercase font-bold mb-1">测试类型</div>
                       {showEditModal ? (
-                        <select name="type" defaultValue={selectedTestCase.type} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
+                        <select
+                          name="type"
+                          defaultValue={selectedTestCase.type}
+                          className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
+                          onChange={(event) => {
+                            const form = event.currentTarget.form;
+                            if (!form) return;
+                            if (event.target.value === 'Manual') {
+                              applyManualTemplateToForm(form);
+                              setEditScriptPath('');
+                            } else {
+                              const executorField = getFormControl<HTMLSelectElement>(form, 'executor_type');
+                              if (executorField?.value === 'manual') executorField.value = 'python';
+                            }
+                          }}
+                        >
                           <option value="Automated">自动化 (Automated)</option>
                           <option value="Manual">手动 (Manual)</option>
                         </select>
@@ -3081,6 +3323,7 @@ export default function App() {
                           <select name="executor_type" defaultValue={selectedTestCase.executor_type || 'python'} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
                             <option value="python">python</option>
                             <option value="shell">shell</option>
+                            <option value="manual">manual</option>
                           </select>
                         ) : (
                           <div className="font-bold text-sm">{selectedTestCase.executor_type || 'python'}</div>

@@ -1,11 +1,48 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { apiClient } from './api/client';
-import { useAppMutations, useBootstrapData, useRefreshExecutionData } from './api/queries';
+import { useAppMutations, useBootstrapData, useDefectsPageData, useManagementPageData, useRefreshExecutionData, useReportsPageData, useTaskDetailData, useTestCaseHistory } from './api/queries';
+import {
+  CASE_CATEGORY_OPTIONS,
+  DEFAULT_RUNTIME_INPUT_SUGGESTIONS,
+  REQUIRED_INPUT_OPTIONS,
+  SECURITY_BASELINE_SUITE_NAME,
+  SECURITY_DOMAIN_OPTIONS,
+} from './app/app-config';
+import {
+  applyManualTemplateToForm,
+  buildCaseDraftFromFormData,
+  formatServerDateTime,
+  getExecutionStatusLabel,
+  getFormControl,
+  getStepExecutionBadge,
+  inferInputsFromScript,
+  isExecutionActive,
+  normalizeExecutionStatus,
+  normalizeFailureCategory,
+  normalizeTestResult,
+  parseCaseSteps,
+  parseDefaultRuntimeInputs,
+  parseStepResults,
+} from './app/app-utils';
+import { AppSidebar } from './app/app-sidebar';
+import { AppTopbar } from './app/app-topbar';
+import { Toast } from './app/app-shell-components';
 import { useAssetsView } from './modules/assets/use-assets-view';
+import { AssetDetailModal } from './modules/assets/asset-detail-modal';
 import { AssetsPage } from './modules/assets/assets-page';
+import { EditAssetModal } from './modules/assets/edit-asset-modal';
+import { RegisterAssetModal } from './modules/assets/register-asset-modal';
+import { DashboardPage } from './modules/dashboard/dashboard-page';
+import { DefectsPage } from './modules/defects/defects-page';
 import { useManagementFilters } from './modules/management/use-management-filters';
+import { CreateTestCaseModal } from './modules/management/create-test-case-modal';
+import { DeleteTestCaseModal } from './modules/management/delete-test-case-modal';
+import { ImportCasesModal } from './modules/management/import-cases-modal';
 import { ManagementPage } from './modules/management/management-page';
+import { TestCaseDrawer } from './modules/management/test-case-drawer';
 import { RequirementsPage } from './modules/requirements/requirements-page';
+import { ReportsPage } from './modules/reports/reports-page';
+import { RunningPage } from './modules/running/running-page';
+import { CreateSuiteModal } from './modules/suites/create-suite-modal';
 import { useSuitesView } from './modules/suites/use-suites-view';
 import { SuitesPage } from './modules/suites/suites-page';
 import { TaraPage } from './modules/tara/tara-page';
@@ -13,372 +50,29 @@ import { useTaskDetail } from './modules/task-detail/use-task-detail';
 import { TaskDetailModal } from './modules/task-detail/task-detail-modal';
 import { useTaskLaunch } from './modules/task-launch/use-task-launch';
 import { TaskLaunchModal } from './modules/task-launch/task-launch-modal';
-import type { LucideIcon } from 'lucide-react';
 import type {
   Asset,
-  CanonicalTestResult,
   Defect,
-  ExecutionStatus,
-  ExecutionTask,
-  ExecutionTaskDetail,
-  FailureCategory,
   ManualTaskItemResultPayload,
   RecentRun,
   Stats,
-  StepExecutionResult,
   SuiteRun,
   TestCase,
-  TestRun,
   TestSuite,
 } from './api/types';
-import { 
-  LayoutDashboard, 
-  PlayCircle, 
-  FileWarning, 
-  Database, 
-  BarChart3, 
-  Users, 
-  Settings,
-  Search,
-  Plus,
-  Bell,
-  ChevronRight,
-  MoreHorizontal,
-  ShieldCheck,
-  AlertTriangle,
-  Activity,
-  Cpu,
-  Car,
-  Layers3,
-  Zap,
-  CheckCircle2,
-  XCircle,
-  Clock,
-  Sun,
-  Moon,
-  BrainCircuit,
-  Trash2,
-  Edit3
-} from 'lucide-react';
+import { ShieldCheck, AlertTriangle, Cpu, Layers3, XCircle, Clock, Trash2, Edit3 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import {
-  ResponsiveContainer, 
-  XAxis, 
-  YAxis, 
-  Tooltip, 
-  CartesianGrid,
-  AreaChart,
-  Area
-} from 'recharts';
 
-const SECURITY_BASELINE_SUITE_NAME = '系统安全基线套件';
-
-const CASE_CATEGORY_OPTIONS = ['IVI', 'T-Box', 'Gateway', 'ADAS', 'BMS', 'OTA', '整车', '云控平台', '移动端', 'CAN总线'];
-const SECURITY_DOMAIN_OPTIONS = ['访问控制', '身份认证', '口令策略', '日志安全', '配置加固', '数据保护', '网络暴露', 'OTA安全', '供应链安全', '未分类'];
-const REQUIRED_INPUT_OPTIONS = [
-  { value: 'connection_address', label: '连接地址', description: '从测试资产自动带入 IP/主机名。' },
-  { value: 'ssh_probe_username', label: 'SSH 测试账号', description: '任务发起时填写用于尝试登录的测试用户名。' },
-  { value: 'ssh_probe_password', label: 'SSH 测试密码', description: '任务发起时填写用于尝试登录的测试密码。' },
-  { value: 'ssh_port', label: 'SSH 端口', description: '任务发起时填写 SSH 端口，默认 22。' },
-  { value: 'adb_port', label: 'ADB 端口', description: '任务发起时填写 ADB 监听端口，默认 5555。' },
-  { value: 'adb_push_target_path', label: 'ADB Push 目标路径', description: '任务发起时填写待写入的设备路径，默认 /data/local/tmp/iov_probe.txt。' },
-  { value: 'adb_pull_source_path', label: 'ADB Pull 源路径', description: '任务发起时填写待拉取的设备路径，默认 /system/build.prop。' },
-  { value: 'telnet_port', label: 'Telnet 端口', description: '任务发起时填写 Telnet 监听端口，默认 23。' },
-  { value: 'ftp_port', label: 'FTP 端口', description: '任务发起时填写 FTP 监听端口，默认 21。' },
-  { value: 'ftp_probe_username', label: 'FTP 测试账号', description: '任务发起时填写用于尝试登录的 FTP 用户名。' },
-  { value: 'ftp_probe_password', label: 'FTP 测试密码', description: '任务发起时填写用于尝试登录的 FTP 密码。' },
-  { value: 'tls_port', label: 'TLS 端口', description: '任务发起时填写 TLS 服务端口，默认 443。' },
-  { value: 'tls_server_name', label: 'TLS 主机名(SNI)', description: '任务发起时填写 TLS 证书校验主机名，不填则默认连接地址。' },
-];
-
-const DEFAULT_RUNTIME_INPUT_SUGGESTIONS: Record<string, string> = {
-  ssh_port: '22',
-  adb_port: '5555',
-  telnet_port: '23',
-  ftp_port: '21',
-  tls_port: '443',
-};
-
-const normalizeStepsText = (value: string) => {
-  const split = value
-    .replace(/[；;]+/g, '\n')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  return split
-    .map((step) => step
-      .replace(/^步骤\s*\d+\s*[：:、.)-]?\s*/i, '')
-      .replace(/^\d+\s*[：:、.)-]\s*/, '')
-      .trim(),
-    )
-    .filter(Boolean)
-    .map((content, index) => `步骤${index + 1}：${content}`);
-};
-
-const hasDeterministicExpectedResult = (value: string) => {
-  const normalized = value.trim().toLowerCase();
-  if (normalized.length < 8) return false;
-  const keywords = ['通过', '失败', '拒绝', '允许', '禁止', '拦截', '判定', '告警', 'must', 'pass', 'fail', 'deny', 'allow', 'blocked'];
-  return keywords.some((keyword) => normalized.includes(keyword.toLowerCase()));
-};
-
-const buildManualCaseTemplate = (params: { title: string; protocol: string; testTool: string }) => {
-  const target = params.title.trim() || '该测试场景';
-  const protocolHint = [params.protocol.trim(), params.testTool.trim()].filter(Boolean).join(' / ');
-  const description = `手动验证${target}，通过人工操作与观察记录评估安全控制策略是否有效。`;
-  const testInput = '测试资产连接地址（自动注入）；人工操作记录；必要测试样本。';
-  const expectedResult = `${target}执行后，未授权或异常行为应被拒绝/拦截，并可明确判定通过或失败。`;
-  const steps = [
-    '步骤1：准备测试环境并确认前置条件（资产在线、权限与连接可用）。',
-    `步骤2：按测试目标执行人工操作并记录关键现象与返回信息${protocolHint ? `（参考协议/工具：${protocolHint}）` : '。'}`,
-    '步骤3：依据判定标准输出通过/失败结论并补充证据说明。',
-  ];
-  return { description, testInput, expectedResult, steps };
-};
-
-const getFormControl = <T extends HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(form: HTMLFormElement, name: string) => {
-  const field = form.elements.namedItem(name);
-  return field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement || field instanceof HTMLSelectElement
-    ? (field as T)
-    : null;
-};
-
-const applyManualTemplateToForm = (form: HTMLFormElement) => {
-  const titleField = getFormControl<HTMLInputElement>(form, 'title');
-  const protocolField = getFormControl<HTMLSelectElement>(form, 'protocol');
-  const toolField = getFormControl<HTMLInputElement>(form, 'test_tool');
-  const descriptionField = getFormControl<HTMLTextAreaElement>(form, 'description');
-  const inputField = getFormControl<HTMLInputElement | HTMLTextAreaElement>(form, 'test_input');
-  const expectedField = getFormControl<HTMLTextAreaElement>(form, 'expected_result');
-  const stepsField = getFormControl<HTMLTextAreaElement>(form, 'steps');
-  const automationField = getFormControl<HTMLSelectElement>(form, 'automation_level');
-  const executorField = getFormControl<HTMLSelectElement>(form, 'executor_type');
-  const scriptField = getFormControl<HTMLInputElement>(form, 'script_path');
-
-  const template = buildManualCaseTemplate({
-    title: titleField?.value || '',
-    protocol: protocolField?.value || '',
-    testTool: toolField?.value || '',
-  });
-
-  if (toolField && !toolField.value.trim()) toolField.value = '人工检查';
-  if (descriptionField && !descriptionField.value.trim()) descriptionField.value = template.description;
-  if (inputField && !inputField.value.trim()) inputField.value = template.testInput;
-  if (expectedField && !expectedField.value.trim()) expectedField.value = template.expectedResult;
-  if (stepsField && normalizeStepsText(stepsField.value).length < 2) stepsField.value = template.steps.join('\n');
-  if (automationField) automationField.value = automationField.value === 'A' ? 'B' : automationField.value || 'B';
-  if (executorField) executorField.value = 'manual';
-  if (scriptField) scriptField.value = '';
-};
-
-const validateCaseQualityDraft = (draft: {
-  securityDomain: string;
-  steps: string[];
-  expectedResult: string;
-  type: string;
-  executorType: string;
-  scriptPath: string;
-}) => {
-  if (!draft.securityDomain || draft.securityDomain === '未分类') {
-    return '安全分类不能为空，且不能为“未分类”';
-  }
-  if (draft.steps.length < 2) {
-    return '测试步骤至少需要 2 步';
-  }
-  if (!hasDeterministicExpectedResult(draft.expectedResult)) {
-    return '预期结果不可判定，请明确通过/失败或允许/拒绝判定标准';
-  }
-  if (draft.type === 'Manual' && draft.executorType !== 'manual') {
-    return '手动用例执行器必须为 manual';
-  }
-  if (draft.type === 'Automated' && draft.executorType === 'manual') {
-    return '自动化用例执行器不能为 manual';
-  }
-  if (draft.type === 'Automated' && !draft.scriptPath) {
-    return '自动化用例必须填写脚本路径';
-  }
-  return null;
-};
-
-const inferInputsFromScript = (scriptPath?: string, testTool?: string) => {
-  const normalized = `${scriptPath || ''} ${(testTool || '')}`.toLowerCase();
-  if (normalized.includes('ssh_access_check')) {
-    return ['connection_address', 'ssh_probe_username', 'ssh_probe_password', 'ssh_port'];
-  }
-  if (normalized.includes('adb_push_check')) {
-    return ['connection_address', 'adb_port', 'adb_push_target_path'];
-  }
-  if (normalized.includes('adb_pull_check')) {
-    return ['connection_address', 'adb_port', 'adb_pull_source_path'];
-  }
-  if (normalized.includes('adb_access_check')) {
-    return ['connection_address', 'adb_port'];
-  }
-  if (normalized.includes('iptables_firewall_check')) {
-    return ['connection_address', 'adb_port'];
-  }
-  if (normalized.includes('least_privilege_check')) {
-    return ['connection_address', 'adb_port'];
-  }
-  if (normalized.includes('certificate_protection_check')) {
-    return ['connection_address', 'adb_port'];
-  }
-  if (normalized.includes('open_port_scan_check')) {
-    return ['connection_address'];
-  }
-  if (normalized.includes('telnet_access_check')) {
-    return ['connection_address', 'telnet_port'];
-  }
-  if (normalized.includes('ftp_access_check')) {
-    return ['connection_address', 'ftp_port', 'ftp_probe_username', 'ftp_probe_password'];
-  }
-  if (normalized.includes('ssh_root_login_disabled_check')) {
-    return ['connection_address', 'ssh_probe_password', 'ssh_port'];
-  }
-  if (normalized.includes('ssh_weak_password_policy_check')) {
-    return ['connection_address', 'ssh_port'];
-  }
-  if (normalized.includes('telnet_service_disabled_check')) {
-    return ['connection_address', 'telnet_port'];
-  }
-  if (normalized.includes('ftp_anonymous_login_disabled_check')) {
-    return ['connection_address', 'ftp_port'];
-  }
-  if (normalized.includes('key_directory_permission_check')) {
-    return ['connection_address', 'adb_port'];
-  }
-  if (normalized.includes('suid_sgid_scan_check')) {
-    return ['connection_address', 'adb_port'];
-  }
-  if (normalized.includes('tls_certificate_validation_check')) {
-    return ['connection_address', 'tls_port', 'tls_server_name'];
-  }
-  if (normalized.includes('tls_weak_cipher_check')) {
-    return ['connection_address', 'tls_port', 'tls_server_name'];
-  }
-  if (normalized.includes('ssh_weak_credential_check')) {
-    return ['connection_address', 'ssh_port'];
-  }
-  if (normalized.includes('ssh_account_lockout_check')) {
-    return ['connection_address', 'ssh_probe_username', 'ssh_port'];
-  }
-  if (normalized.includes('ssh')) {
-    return ['connection_address', 'ssh_probe_username', 'ssh_probe_password', 'ssh_port'];
-  }
-  if (normalized.includes('adb')) {
-    return ['connection_address', 'adb_port'];
-  }
-  if (normalized.includes('telnet')) {
-    return ['connection_address', 'telnet_port'];
-  }
-  if (normalized.includes('ftp')) {
-    return ['connection_address', 'ftp_port', 'ftp_probe_username', 'ftp_probe_password'];
-  }
-  return [] as string[];
-};
-
-const normalizeExecutionStatus = (status?: string | null): ExecutionStatus => {
-  const normalized = String(status || '').trim().toUpperCase();
-  if (normalized === 'RUNNING') return 'RUNNING';
-  if (normalized === 'COMPLETED' || normalized === 'FAILED') return 'COMPLETED';
-  if (normalized === 'CANCELLED') return 'CANCELLED';
-  return 'PENDING';
-};
-
-const normalizeTestResult = (result?: string | null): CanonicalTestResult | null => {
-  if (!result) return null;
-  const normalized = String(result).trim().toUpperCase();
-  if (normalized === 'PASSED') return 'PASSED';
-  if (normalized === 'FAILED') return 'FAILED';
-  if (normalized === 'BLOCKED') return 'BLOCKED';
-  if (normalized === 'ERROR') return 'ERROR';
-  return null;
-};
-
-const normalizeFailureCategory = (value?: string | null): FailureCategory => {
-  const normalized = String(value || '').trim().toUpperCase();
-  if (normalized === 'ENVIRONMENT') return 'ENVIRONMENT';
-  if (normalized === 'PERMISSION') return 'PERMISSION';
-  if (normalized === 'SCRIPT') return 'SCRIPT';
-  return 'NONE';
-};
-
-const isExecutionActive = (status?: string | null) => {
-  const normalized = normalizeExecutionStatus(status);
-  return normalized === 'PENDING' || normalized === 'RUNNING';
-};
-
-// --- Components ---
-
-interface ToastProps {
-  message: string;
-  type: 'success' | 'error';
-  onClose: () => void;
-  key?: React.Key;
-}
-
-const Toast = ({ message, type, onClose }: ToastProps) => (
-  <motion.div
-    initial={{ opacity: 0, y: 20, x: 20 }}
-    animate={{ opacity: 1, y: 0, x: 0 }}
-    exit={{ opacity: 0, scale: 0.95 }}
-    className={`fixed bottom-8 right-8 z-[100] flex items-center gap-3 px-4 py-3 rounded-xl border shadow-2xl backdrop-blur-md ${
-      type === 'success' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500' : 'bg-red-500/10 border-red-500/20 text-red-500'
-    }`}
-  >
-    {type === 'success' ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
-    <span className="text-sm font-medium">{message}</span>
-    <button onClick={onClose} className="ml-2 hover:opacity-70 transition-opacity">
-      <MoreHorizontal size={14} />
-    </button>
-  </motion.div>
-);
-
-const SidebarItem = ({ icon: Icon, label, active, badge, onClick }: { icon: LucideIcon, label: string, active?: boolean, badge?: string, onClick: () => void }) => (
-  <button 
-    onClick={onClick}
-    className={`w-full flex items-center justify-between px-6 py-3 text-sm transition-all relative ${
-      active ? 'text-white' : 'text-text-secondary hover:text-white hover:bg-white/5'
-    }`}
-  >
-    <div className="flex items-center gap-3">
-      <Icon size={18} className={active ? 'text-accent' : ''} />
-      <span className="font-medium">{label}</span>
-    </div>
-    {badge && (
-      <span className="bg-accent/20 text-accent text-[10px] px-1.5 py-0.5 rounded font-bold">
-        {badge}
-      </span>
-    )}
-    {active && <div className="absolute left-0 top-0 bottom-0 w-1 bg-accent" />}
-  </button>
-);
-
-const StatCard = ({ label, value, trend, footnote, icon: Icon, color }: { label: string, value: string | number, trend?: string, footnote?: string, icon: LucideIcon, color: string }) => (
-  <div className="glass-card p-6 flex-1 min-w-[240px]">
-    <div className="flex justify-between items-start mb-4">
-      <div className="flex items-center gap-2">
-        <div className={`w-2 h-2 rounded-full ${color}`} />
-        <span className="text-[12px] text-text-secondary font-medium">{label}</span>
-      </div>
-      <div className="bg-white/5 p-2 rounded-lg">
-        <Icon size={20} className="text-text-secondary" />
-      </div>
-    </div>
-    <div className="flex items-end gap-3">
-      <div className="text-3xl font-bold tracking-tight">{value}</div>
-      {trend && <div className="text-[11px] text-success font-medium pb-1">{trend}</div>}
-    </div>
-    <div className="mt-4 text-[10px] text-text-secondary uppercase tracking-wider font-bold">
-      {footnote || '实时统计'}
-    </div>
-  </div>
-);
+const DEFECTS_PAGE_SIZE = 10;
+const MANAGEMENT_PAGE_SIZE = 10;
 
 export default function App() {
   const [view, setView] = useState<'dashboard' | 'running' | 'defects' | 'assets' | 'reports' | 'management' | 'suites' | 'requirements' | 'tara'>('dashboard');
   const bootstrapData = useBootstrapData();
+  const [defectsPage, setDefectsPage] = useState(1);
+  const [managementPage, setManagementPage] = useState(1);
+  const defectsPageData = useDefectsPageData(view === 'defects', defectsPage, DEFECTS_PAGE_SIZE);
+  const reportsPageData = useReportsPageData(view === 'reports');
   const refreshExecutionData = useRefreshExecutionData();
   const mutations = useAppMutations();
   const testCases = bootstrapData.testCases;
@@ -396,7 +90,6 @@ export default function App() {
   const taraItems = bootstrapData.taraItems;
   const recentRuns = bootstrapData.recentRuns;
   const {
-    runTestCase: runTestCaseMutation,
     runSuite: runSuiteMutation,
     runCases: runCasesMutation,
     cancelTask: cancelTaskMutation,
@@ -431,7 +124,6 @@ export default function App() {
   const [managementSecurityDomainFilter, setManagementSecurityDomainFilter] = useState<string>('All');
   const [managementAutomationFilter, setManagementAutomationFilter] = useState<string>('All');
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showEditModal, setShowEditModal] = useState(false);
   const [showAssetModal, setShowAssetModal] = useState(false);
   const [showEditAssetModal, setShowEditAssetModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
@@ -452,14 +144,9 @@ export default function App() {
   const [toasts, setToasts] = useState<{ id: string, message: string, type: 'success' | 'error' }[]>([]);
   const [selectedTestCase, setSelectedTestCase] = useState<TestCase | null>(null);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
-  const [selectedTaskDetail, setSelectedTaskDetail] = useState<ExecutionTaskDetail | null>(null);
-  const [isTaskDetailLoading, setIsTaskDetailLoading] = useState(false);
+  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
   const [manualSubmittingItemId, setManualSubmittingItemId] = useState<number | null>(null);
   const [pingingAssetId, setPingingAssetId] = useState<number | null>(null);
-  const [history, setHistory] = useState<TestRun[]>([]);
-  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
-  const [isRunningSimulation, setIsRunningSimulation] = useState(false);
-  const [simulationLogs, setSimulationLogs] = useState<Array<{ timestamp: string; message: string; testCaseId?: number }>>([]);
   const [analyzingDefectId, setAnalyzingDefectId] = useState<string | null>(null);
   const [isUpdatingAsset, setIsUpdatingAsset] = useState(false);
   const [defectAnalysis, setDefectAnalysis] = useState<Record<string, string>>({});
@@ -488,6 +175,12 @@ export default function App() {
     securityDomainFilter: managementSecurityDomainFilter,
     automationFilter: managementAutomationFilter,
   });
+  const managementPageData = useManagementPageData(view === 'management', managementPage, MANAGEMENT_PAGE_SIZE, {
+    search: managementSearchQuery,
+    category: managementCategoryFilter,
+    securityDomain: managementSecurityDomainFilter,
+    automationLevel: managementAutomationFilter,
+  });
 
   const parseRequiredInputs = (value?: string | null) => {
     if (!value) return [] as string[];
@@ -496,37 +189,6 @@ export default function App() {
       return Array.isArray(parsed) ? parsed : [];
     } catch {
       return [];
-    }
-  };
-
-  const parseDefaultRuntimeInputs = (value?: string | null) => {
-    if (!value) return {} as Record<string, string>;
-    try {
-      const parsed = JSON.parse(value);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {} as Record<string, string>;
-      return Object.fromEntries(
-        Object.entries(parsed as Record<string, unknown>)
-          .map(([key, raw]) => [key, String(raw ?? '').trim()] as const)
-          .filter(([, v]) => v !== '')
-      );
-    } catch {
-      return {} as Record<string, string>;
-    }
-  };
-
-  const parseCaseSteps = (value?: string | null) => {
-    if (!value) return [] as string[];
-    try {
-      const parsed = JSON.parse(value);
-      if (Array.isArray(parsed)) {
-        return parsed.map((step) => String(step).trim()).filter(Boolean);
-      }
-      if (typeof parsed === 'string') {
-        return parsed.split(/\r?\n/).map((step) => step.trim()).filter(Boolean);
-      }
-      return [] as string[];
-    } catch {
-      return String(value).split(/\r?\n/).map((step) => step.trim()).filter(Boolean);
     }
   };
 
@@ -570,6 +232,12 @@ export default function App() {
     () => resolveRuntimeInputs(editScriptPath, editTestTool, selectedTestCase?.required_inputs),
     [editScriptPath, editTestTool, selectedTestCase?.required_inputs]
   );
+  const historyData = useTestCaseHistory(Boolean(selectedTestCase?.id), selectedTestCase?.id || null);
+  const taskDetailData = useTaskDetailData(Boolean(selectedTaskId), selectedTaskId);
+  const selectedTaskDetail = taskDetailData.detail;
+  const isTaskDetailLoading = taskDetailData.isLoading || taskDetailData.isFetching;
+  const history = historyData.history;
+  const isHistoryLoading = historyData.isLoading || historyData.isFetching;
   const taskDetailView = useTaskDetail(selectedTaskDetail);
 
   useEffect(() => {
@@ -580,10 +248,10 @@ export default function App() {
   }, [showCreateModal]);
 
   useEffect(() => {
-    if (!showEditModal || !selectedTestCase) return;
+    if (!selectedTestCase) return;
     setEditScriptPath(selectedTestCase.script_path || '');
     setEditTestTool(selectedTestCase.test_tool || '');
-  }, [showEditModal, selectedTestCase]);
+  }, [selectedTestCase]);
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem('iov-core-theme') as 'dark' | 'light' | null;
@@ -642,21 +310,16 @@ export default function App() {
     
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      if (data.type === 'SIMULATION_LOG') {
-        if (selectedTestCase?.id === data.testCaseId) {
-          setSimulationLogs(prev => [...prev, data].slice(-10));
-        }
-      } else if (data.type === 'SIMULATION_COMPLETE') {
+      if (data.type === 'SIMULATION_COMPLETE') {
         refreshExecutionData();
         if (selectedTestCase?.id === data.testCaseId) {
-          fetchHistory(data.testCaseId);
-          setIsRunningSimulation(false);
+          void historyData.refetch();
           setSelectedTestCase(prev => prev ? { ...prev, status: data.result } : null);
         }
       } else if (data.type === 'EXECUTION_TASK_UPDATED' || data.type === 'EXECUTION_TASK_COMPLETED') {
         refreshExecutionData();
-        if (selectedTaskDetail?.task.id && data.task?.id === selectedTaskDetail.task.id) {
-          fetchTaskDetail(selectedTaskDetail.task.id, false);
+        if (selectedTaskId && data.task?.id === selectedTaskId) {
+          void taskDetailData.refetch();
         }
         if (data.type === 'EXECUTION_TASK_COMPLETED') {
           addToast(data.task?.type === 'suite' ? '测试套件执行完成' : '测试任务执行完成', 'success');
@@ -665,80 +328,20 @@ export default function App() {
     };
 
     return () => ws.close();
-  }, [refreshExecutionData, selectedTestCase?.id, selectedTaskDetail?.task.id]);
+  }, [historyData, refreshExecutionData, selectedTaskId, selectedTestCase?.id, taskDetailData]);
+
+  useEffect(() => {
+    if (selectedTaskId && taskDetailData.error && !selectedTaskDetail) {
+      addToast('读取任务详情失败', 'error');
+      setSelectedTaskId(null);
+    }
+  }, [selectedTaskDetail, selectedTaskId, taskDetailData.error]);
 
   const formatDuration = (seconds: number) => {
     if (!seconds) return '--';
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}分 ${secs}秒`;
-  };
-
-  const formatServerDateTime = (value?: string | null) => {
-    if (!value) return '-';
-    const normalized = value.includes('T')
-      ? (value.endsWith('Z') ? value : `${value}Z`)
-      : `${value.replace(' ', 'T')}Z`;
-    const parsed = new Date(normalized);
-    if (Number.isNaN(parsed.getTime())) {
-      return value;
-    }
-    return parsed.toLocaleString('zh-CN', { hour12: false });
-  };
-
-  const parseStepResults = (value?: string | null): StepExecutionResult[] => {
-    if (!value) return [];
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  };
-
-  const getStepExecutionBadge = (step: StepExecutionResult) => {
-    const normalizedCommandResult = String(step.command_result || '').trim().toUpperCase();
-    const normalizedStepResult = normalizeTestResult(step.result);
-    if (normalizedCommandResult === 'PASSED' || normalizedCommandResult === 'SUCCEEDED') {
-      return { label: '命令成功', className: 'text-success' };
-    }
-    if (normalizedCommandResult === 'FAILED') {
-      return { label: '命令失败', className: 'text-danger' };
-    }
-    if (normalizedCommandResult === 'BLOCKED') {
-      return { label: '命令阻塞', className: 'text-warning' };
-    }
-    if (normalizedCommandResult === 'ERROR') {
-      return { label: '命令异常', className: 'text-danger' };
-    }
-    if (normalizedStepResult === 'BLOCKED') {
-      return { label: '已阻止', className: 'text-warning' };
-    }
-    if (normalizedStepResult === 'PASSED') {
-      return { label: '通过', className: 'text-success' };
-    }
-    if (normalizedStepResult === 'FAILED') {
-      return { label: '未通过', className: 'text-danger' };
-    }
-    if (normalizedStepResult === 'ERROR') {
-      return { label: '执行异常', className: 'text-danger' };
-    }
-    return { label: step.result, className: 'text-muted' };
-  };
-
-  const getExecutionStatusLabel = (status?: string | null) => {
-    switch (normalizeExecutionStatus(status)) {
-      case 'PENDING':
-        return '排队中';
-      case 'RUNNING':
-        return '执行中';
-      case 'COMPLETED':
-        return '已完成';
-      case 'CANCELLED':
-        return '已取消';
-      default:
-        return status || '排队中';
-    }
   };
 
   const getExecutionStatusBadgeClass = (status?: string | null) => {
@@ -812,49 +415,6 @@ export default function App() {
     }, 3000);
   };
 
-  const fetchHistory = async (id: number) => {
-    setIsHistoryLoading(true);
-    try {
-      const data = await apiClient.getHistory(id);
-      setHistory(data);
-    } catch (error) {
-      console.error('Failed to fetch history:', error);
-    } finally {
-      setIsHistoryLoading(false);
-    }
-  };
-
-  const fetchTaskDetail = async (taskId: number, openModal = true) => {
-    setIsTaskDetailLoading(true);
-    try {
-      const data = await apiClient.getTaskDetail(taskId);
-      setSelectedTaskDetail(data);
-    } catch (error) {
-      console.error('Failed to fetch task detail:', error);
-      addToast('读取任务详情失败', 'error');
-      if (openModal) {
-        setSelectedTaskDetail(null);
-      }
-    } finally {
-      setIsTaskDetailLoading(false);
-    }
-  };
-
-  const runSimulation = async (id: number) => {
-    setIsRunningSimulation(true);
-    setSimulationLogs([]);
-    addToast('正在创建测试任务...', 'success');
-    try {
-      await runTestCaseMutation.mutateAsync({ testCaseId: id });
-      await refreshExecutionData();
-      addToast('测试任务已开始执行', 'success');
-    } catch (error) {
-      console.error('Simulation failed:', error);
-      addToast('模拟执行过程中发生错误', 'error');
-      setIsRunningSimulation(false);
-    }
-  };
-
   const submitManualTaskItemResult = async (
     taskId: number,
     itemId: number,
@@ -865,7 +425,9 @@ export default function App() {
       const response = await submitManualTaskResultMutation.mutateAsync({ taskId, itemId, body: payload });
       addToast(response.resumed ? '人工结果已提交，任务继续执行。' : '人工结果已提交。', 'success');
       await refreshExecutionData();
-      await fetchTaskDetail(taskId, false);
+      if (selectedTaskId === taskId) {
+        await taskDetailData.refetch();
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : '提交人工结果失败';
       addToast(message, 'error');
@@ -895,6 +457,26 @@ export default function App() {
     acc[defect.severity] = (acc[defect.severity] || 0) + 1;
     return acc;
   }, {} as Record<string, number>);
+  const currentDefects = reportsPageData.isLoading ? defects : reportsPageData.defects;
+  const currentDefectSummary = currentDefects.reduce((acc, defect) => {
+    acc[defect.severity] = (acc[defect.severity] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  const reportsTrendData = reportsPageData.isLoading ? trendData : reportsPageData.trendData;
+  const reportsCoverageData = reportsPageData.isLoading ? coverageData : reportsPageData.coverageData;
+  const fallbackDefectsPageItems = defects.slice((defectsPage - 1) * DEFECTS_PAGE_SIZE, defectsPage * DEFECTS_PAGE_SIZE);
+  const defectsPageItems = defectsPageData.isLoading ? fallbackDefectsPageItems : defectsPageData.defects;
+  const defectsPageSummary = defectsPageData.isLoading ? defectSummary : defectsPageData.summary;
+  const defectsPageTotal = defectsPageData.isLoading ? defects.length : defectsPageData.pagination.total;
+  const defectsPageTotalPages = defectsPageData.isLoading
+    ? Math.max(1, Math.ceil(defects.length / DEFECTS_PAGE_SIZE))
+    : defectsPageData.pagination.totalPages;
+  const fallbackManagementItems = managementFilteredTestCases.slice((managementPage - 1) * MANAGEMENT_PAGE_SIZE, managementPage * MANAGEMENT_PAGE_SIZE);
+  const managementPageItems = managementPageData.isLoading ? fallbackManagementItems : managementPageData.testCases;
+  const managementTotal = managementPageData.isLoading ? managementFilteredTestCases.length : managementPageData.pagination.total;
+  const managementTotalPages = managementPageData.isLoading
+    ? Math.max(1, Math.ceil(managementFilteredTestCases.length / MANAGEMENT_PAGE_SIZE))
+    : managementPageData.pagination.totalPages;
   const totalRuns = stats?.results?.reduce((sum, item) => sum + Number(item.count || 0), 0) || 0;
   const passedRuns = stats?.results?.find((item) => normalizeTestResult(item.result) === 'PASSED')?.count || 0;
   const reliability = totalRuns > 0 ? Math.round((passedRuns / totalRuns) * 100) : 0;
@@ -914,6 +496,28 @@ export default function App() {
     { label: 'Minor', count: Number(defectSummary.Minor || 0), color: 'bg-accent' },
   ];
   const totalDashboardDefects = dashboardDefectDistribution.reduce((sum, item) => sum + item.count, 0);
+  const reportDefectDistribution = [
+    { label: 'Critical', count: Number(currentDefectSummary.Critical || 0), color: 'bg-danger' },
+    { label: 'Major', count: Number(currentDefectSummary.Major || 0), color: 'bg-warning' },
+    { label: 'Minor', count: Number(currentDefectSummary.Minor || 0), color: 'bg-accent' },
+    { label: 'Low', count: Number(currentDefectSummary.Low || 0), color: 'bg-success' },
+  ];
+
+  useEffect(() => {
+    if (defectsPage > defectsPageTotalPages) {
+      setDefectsPage(defectsPageTotalPages);
+    }
+  }, [defectsPage, defectsPageTotalPages]);
+
+  useEffect(() => {
+    setManagementPage(1);
+  }, [managementSearchQuery, managementCategoryFilter, managementSecurityDomainFilter, managementAutomationFilter]);
+
+  useEffect(() => {
+    if (managementPage > managementTotalPages) {
+      setManagementPage(managementTotalPages);
+    }
+  }, [managementPage, managementTotalPages]);
 
   const pingAsset = async (asset: Asset) => {
     setPingingAssetId(asset.id);
@@ -995,89 +599,20 @@ export default function App() {
     }
   };
 
-  const collectDefaultRuntimeInputs = (formData: FormData, inputKeys: string[]) => {
-    const defaults: Record<string, string> = {};
-    inputKeys.forEach((inputKey) => {
-      if (inputKey === 'connection_address') return;
-      const value = String(formData.get(`default_input_${inputKey}`) || '').trim();
-      if (value) {
-        defaults[inputKey] = value;
-      }
-    });
-    return defaults;
-  };
-
   const createTestCase = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const type = String(formData.get('type') || 'Automated').trim() === 'Manual' ? 'Manual' : 'Automated';
-    const title = String(formData.get('title') || '').trim();
-    const protocol = String(formData.get('protocol') || '').trim();
-    const securityDomain = String(formData.get('security_domain') || '未分类').trim();
-    const testToolRaw = String(formData.get('test_tool') || '').trim();
-    let scriptPath = String(formData.get('script_path') || '').trim();
-    let description = String(formData.get('description') || '').trim();
-    let testInput = String(formData.get('test_input') || '').trim();
-    let expectedResult = String(formData.get('expected_result') || '').trim();
-    let steps = normalizeStepsText(String(formData.get('steps') || ''));
-
-    const manualTemplate = type === 'Manual'
-      ? buildManualCaseTemplate({ title, protocol, testTool: testToolRaw })
-      : null;
-
-    if (manualTemplate) {
-      description = description || manualTemplate.description;
-      testInput = testInput || manualTemplate.testInput;
-      expectedResult = expectedResult || manualTemplate.expectedResult;
-      if (steps.length < 2) {
-        steps = manualTemplate.steps;
-      }
-      scriptPath = '';
-    }
-
-    const testTool = testToolRaw || (type === 'Manual' ? '人工检查' : '');
-    const executorType = type === 'Manual' ? 'manual' : String(formData.get('executor_type') || 'python').trim();
-    const automationLevelRaw = String(formData.get('automation_level') || '').trim();
-    const automationLevel = type === 'Manual' && (!automationLevelRaw || automationLevelRaw === 'A') ? 'B' : automationLevelRaw;
-    const required_inputs = type === 'Manual' ? ['connection_address'] : resolveRuntimeInputs(scriptPath, testTool, null);
-    const default_runtime_inputs = type === 'Manual' ? {} : collectDefaultRuntimeInputs(formData, required_inputs);
-
-    const qualityError = validateCaseQualityDraft({
-      securityDomain,
-      steps,
-      expectedResult,
-      type,
-      executorType,
-      scriptPath,
+    const draft = buildCaseDraftFromFormData({
+      formData,
+      resolveRuntimeInputs,
     });
-    if (qualityError) {
-      addToast(qualityError, 'error');
+    if (!draft.ok) {
+      addToast(draft.error, 'error');
       return;
     }
 
-    const newCase = {
-      title,
-      category: formData.get('category'),
-      security_domain: securityDomain,
-      type,
-      protocol,
-      description,
-      steps,
-      test_input: testInput,
-      test_tool: testTool,
-      expected_result: expectedResult,
-      automation_level: automationLevel,
-      executor_type: executorType,
-      script_path: scriptPath,
-      command_template: '',
-      args_template: '',
-      timeout_sec: formData.get('timeout_sec'),
-      required_inputs,
-      default_runtime_inputs,
-    };
-
     try {
-      await createCaseMutation.mutateAsync(newCase as Record<string, unknown>);
+      await createCaseMutation.mutateAsync(draft.value as Record<string, unknown>);
       addToast('测试用例创建成功', 'success');
       setShowCreateModal(false);
       setCreateScriptPath('');
@@ -1137,87 +672,28 @@ export default function App() {
     e.preventDefault();
     if (!selectedTestCase) return;
     const formData = new FormData(e.currentTarget);
-    const type = String(formData.get('type') || 'Automated').trim() === 'Manual' ? 'Manual' : 'Automated';
-    const title = String(formData.get('title') || '').trim();
-    const protocol = String(formData.get('protocol') || '').trim();
-    const securityDomain = String(formData.get('security_domain') || '未分类').trim();
-    const testToolRaw = String(formData.get('test_tool') || '').trim();
-    let scriptPath = String(formData.get('script_path') || '').trim();
-    let description = String(formData.get('description') || '').trim();
-    let testInput = String(formData.get('test_input') || '').trim();
-    let expectedResult = String(formData.get('expected_result') || '').trim();
-    let steps = normalizeStepsText(String(formData.get('steps') || ''));
-
-    const manualTemplate = type === 'Manual'
-      ? buildManualCaseTemplate({ title, protocol, testTool: testToolRaw })
-      : null;
-
-    if (manualTemplate) {
-      description = description || manualTemplate.description;
-      testInput = testInput || manualTemplate.testInput;
-      expectedResult = expectedResult || manualTemplate.expectedResult;
-      if (steps.length < 2) {
-        steps = manualTemplate.steps;
-      }
-      scriptPath = '';
-    }
-
-    const testTool = testToolRaw || (type === 'Manual' ? '人工检查' : '');
-    const executorType = type === 'Manual' ? 'manual' : String(formData.get('executor_type') || 'python').trim();
-    const automationLevelRaw = String(formData.get('automation_level') || '').trim();
-    const automationLevel = type === 'Manual' && (!automationLevelRaw || automationLevelRaw === 'A') ? 'B' : automationLevelRaw;
-    const required_inputs = type === 'Manual'
-      ? ['connection_address']
-      : resolveRuntimeInputs(scriptPath, testTool, selectedTestCase.required_inputs);
-    const default_runtime_inputs = type === 'Manual' ? {} : collectDefaultRuntimeInputs(formData, required_inputs);
-
-    const qualityError = validateCaseQualityDraft({
-      securityDomain,
-      steps,
-      expectedResult,
-      type,
-      executorType,
-      scriptPath,
+    const draft = buildCaseDraftFromFormData({
+      formData,
+      resolveRuntimeInputs,
+      fallbackRequiredInputs: selectedTestCase.required_inputs,
     });
-    if (qualityError) {
-      addToast(qualityError, 'error');
+    if (!draft.ok) {
+      addToast(draft.error, 'error');
       return;
     }
 
-    const updatedCase = {
-      title,
-      category: formData.get('category'),
-      security_domain: securityDomain,
-      type,
-      protocol,
-      description,
-      steps,
-      test_input: testInput,
-      test_tool: testTool,
-      expected_result: expectedResult,
-      automation_level: automationLevel,
-      executor_type: executorType,
-      script_path: scriptPath,
-      command_template: '',
-      args_template: '',
-      timeout_sec: formData.get('timeout_sec'),
-      required_inputs,
-      default_runtime_inputs,
-    };
-
     try {
-      await updateCaseMutation.mutateAsync({ testCaseId: selectedTestCase.id, body: updatedCase as Record<string, unknown> });
+      await updateCaseMutation.mutateAsync({ testCaseId: selectedTestCase.id, body: draft.value as Record<string, unknown> });
       const patchedCase = {
         ...selectedTestCase,
-        ...updatedCase,
-        timeout_sec: Number(updatedCase.timeout_sec || selectedTestCase.timeout_sec || 300),
-        steps: JSON.stringify(steps),
-        required_inputs: JSON.stringify(required_inputs),
-        default_runtime_inputs: JSON.stringify(default_runtime_inputs),
+        ...draft.value,
+        timeout_sec: Number(draft.value.timeout_sec || selectedTestCase.timeout_sec || 300),
+        steps: JSON.stringify(draft.value.steps),
+        required_inputs: JSON.stringify(draft.value.required_inputs),
+        default_runtime_inputs: JSON.stringify(draft.value.default_runtime_inputs),
       } as TestCase;
       addToast('测试用例已更新', 'success');
       setSelectedTestCase(patchedCase);
-      setShowEditModal(false);
     } catch (error) {
       addToast(error instanceof Error ? error.message : '更新失败', 'error');
     }
@@ -1381,6 +857,10 @@ export default function App() {
     setDeleteTestCaseCandidate({ id, title: resolvedTitle });
   };
 
+  const closeTestCaseDrawer = () => {
+    setSelectedTestCase(null);
+  };
+
   const confirmDeleteTestCase = async () => {
     if (!deleteTestCaseCandidate) return;
     setIsDeletingTestCase(true);
@@ -1388,7 +868,6 @@ export default function App() {
       await deleteCaseMutation.mutateAsync(deleteTestCaseCandidate.id);
       addToast('测试用例已删除', 'success');
       if (selectedTestCase?.id === deleteTestCaseCandidate.id) {
-        setShowEditModal(false);
         setSelectedTestCase(null);
       }
       setDeleteTestCaseCandidate(null);
@@ -1444,7 +923,6 @@ export default function App() {
       await cancelTaskMutation.mutateAsync(taskId);
       addToast('任务已取消', 'success');
       refreshExecutionData();
-      setIsRunningSimulation(false);
     } catch (error) {
       addToast('取消任务失败', 'error');
     }
@@ -1469,18 +947,6 @@ export default function App() {
       addToast('删除测试套件失败', 'error');
     }
   };
-
-  const currentViewLabel = {
-    dashboard: '仪表盘',
-    requirements: '需求管理',
-    tara: '威胁分析',
-    management: '用例管理',
-    suites: '测试套件',
-    running: '仿真执行',
-    defects: '缺陷日志',
-    assets: '测试资产',
-    reports: '分析报告',
-  }[view];
 
   const chartAccent = theme === 'dark' ? '#5544FF' : '#3156e8';
   const chartAccentStrong = theme === 'dark' ? '#4433EE' : '#2446cb';
@@ -1608,365 +1074,68 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-bg text-text-primary overflow-hidden">
-      {/* Sidebar */}
-      <aside className="w-64 border-r border-border flex flex-col bg-bg z-20 app-sidebar">
-        <div className="p-8">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-accent rounded flex items-center justify-center">
-              <Zap size={18} className="text-white" fill="white" />
-            </div>
-            <h1 className="text-lg font-bold tracking-tighter uppercase">IOV-CORE</h1>
-          </div>
-        </div>
+      <AppSidebar
+        view={view}
+        testSuitesCount={testSuites.length}
+        activeExecutionTasksCount={activeExecutionTasks.length}
+        onChangeView={setView}
+      />
 
-        <div className="flex-1 py-4">
-          <div className="px-8 mb-4 text-[10px] uppercase tracking-widest text-muted font-bold">平台功能</div>
-          <nav className="space-y-1">
-            <SidebarItem icon={LayoutDashboard} label="仪表盘" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
-            <SidebarItem icon={BrainCircuit} label="威胁分析 (TARA)" active={view === 'tara'} onClick={() => setView('tara')} />
-            <SidebarItem icon={ShieldCheck} label="需求管理" active={view === 'requirements'} onClick={() => setView('requirements')} />
-            <SidebarItem icon={Database} label="用例管理" active={view === 'management'} onClick={() => setView('management')} />
-            <SidebarItem icon={Layers3} label="测试套件" badge={testSuites.length ? String(testSuites.length) : undefined} active={view === 'suites'} onClick={() => setView('suites')} />
-            <SidebarItem icon={PlayCircle} label="仿真执行" badge={String(activeExecutionTasks.length)} active={view === 'running'} onClick={() => setView('running')} />
-            <SidebarItem icon={FileWarning} label="缺陷日志" active={view === 'defects'} onClick={() => setView('defects')} />
-            <SidebarItem icon={Database} label="测试资产" active={view === 'assets'} onClick={() => setView('assets')} />
-            <SidebarItem icon={BarChart3} label="分析报告" active={view === 'reports'} onClick={() => setView('reports')} />
-          </nav>
-
-          <div className="px-8 mt-8 mb-4 text-[10px] uppercase tracking-widest text-muted font-bold">系统管理</div>
-          <nav className="space-y-1">
-            <SidebarItem icon={Users} label="团队成员" onClick={() => {}} />
-            <SidebarItem icon={Settings} label="偏好设置" onClick={() => {}} />
-          </nav>
-        </div>
-      </aside>
-
-      {/* Main Content */}
       <main className="flex-1 flex flex-col overflow-hidden">
-        {/* Top Bar */}
-        <header className="h-16 border-b border-border flex items-center justify-between px-8 bg-bg/80 backdrop-blur-md z-10 app-topbar">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-text-secondary">平台</span>
-            <ChevronRight size={14} className="text-muted" />
-            <span className="text-white font-medium">{currentViewLabel}</span>
-          </div>
+        <AppTopbar
+          view={view}
+          theme={theme}
+          setTheme={setTheme}
+          searchQuery={searchQuery}
+          setSearchQuery={setSearchQuery}
+        />
 
-          <div className="flex items-center gap-6">
-            <div className="relative">
-              <div className="theme-toggle-glow" />
-              <div className="segmented-control">
-                <div
-                  className="segmented-thumb"
-                  style={{ transform: theme === 'dark' ? 'translateX(0)' : 'translateX(calc(100% + 4px))' }}
-                />
-                <button
-                  onClick={() => setTheme('dark')}
-                  className={`segmented-option ${theme === 'dark' ? 'is-active' : ''}`}
-                >
-                  <Moon size={14} />
-                  <span>深色</span>
-                </button>
-                <button
-                  onClick={() => setTheme('light')}
-                  className={`segmented-option ${theme === 'light' ? 'is-active' : ''}`}
-                >
-                  <Sun size={14} />
-                  <span>浅色</span>
-                </button>
-              </div>
-            </div>
-            <div className="relative group">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted group-focus-within:text-accent transition-colors" size={16} />
-              <input 
-                type="text" 
-                placeholder="搜索 ECU、VIN、DTC..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="bg-card border border-border rounded-lg pl-10 pr-4 py-1.5 text-xs w-64 focus:outline-none focus:border-accent transition-all"
-              />
-              <div className="absolute right-3 top-1/2 -translate-y-1/2 flex gap-1">
-                <span className="text-[10px] bg-border px-1 rounded text-text-secondary">⌘</span>
-                <span className="text-[10px] bg-border px-1 rounded text-text-secondary">K</span>
-              </div>
-            </div>
-            <button className="text-text-secondary hover:text-white transition-colors">
-              <Bell size={20} />
-            </button>
-            <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-accent to-sky-400" />
-          </div>
-        </header>
-
-        {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-8 space-y-8">
           {view === 'dashboard' ? (
-            <>
-              {/* Header Section */}
-              <div className="flex justify-between items-end">
-                <div>
-                  <h2 className="text-2xl font-bold mb-2">车辆与组件测试概览</h2>
-                  <p className="text-sm text-text-secondary">监控自动化测试运行、ECU 仿真及整车诊断。</p>
-                </div>
-                <div className="flex gap-3">
-                  <div className="flex bg-card border border-border rounded-lg p-1">
-                    {['All', 'CAN', 'Ethernet', 'V2X'].map(p => (
-                      <button 
-                        key={p}
-                        onClick={() => setFilterProtocol(p)}
-                        className={`px-3 py-1 rounded-md text-[10px] font-bold transition-all ${filterProtocol === p ? 'bg-accent text-white' : 'text-muted hover:text-white'}`}
-                      >
-                        {p}
-                      </button>
-                    ))}
-                  </div>
-                  <button 
-                    onClick={() => {
-                      setLaunchMode('suite');
-                      setIsCasePickerOpen(false);
-                      if (selectedBaselineSuite) {
-                        setSelectedSuiteId(String(selectedBaselineSuite.id));
-                      }
-                      if (onlineAssets.length === 1) {
-                        setSelectedAssetId(String(onlineAssets[0].id));
-                      }
-                      setShowTaskModal(true);
-                    }}
-                    className="bg-accent px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-[#4433EE] transition-colors shadow-lg shadow-accent/20"
-                  >
-                    <Plus size={16} />
-                    发起测试任务
-                  </button>
-                </div>
-              </div>
-
-              {/* Stats Grid */}
-              <div className="flex gap-6 overflow-x-auto pb-2">
-                <StatCard
-                  label="系统可靠性"
-                  value={`${reliability}%`}
-                  trend={reliabilityTrendText}
-                  footnote={totalRuns > 0 ? `基于 ${totalRuns} 次真实执行结果` : '暂无真实执行数据'}
-                  icon={ShieldCheck}
-                  color="bg-success"
-                />
-                <StatCard
-                  label="严重缺陷"
-                  value={severeDefectCount}
-                  footnote={severeDefectCount > 0 ? `Critical + Major 共 ${severeDefectCount} 条` : '当前无高优先级缺陷'}
-                  icon={AlertTriangle}
-                  color="bg-danger"
-                />
-                <StatCard
-                  label="运行中仿真"
-                  value={runningTaskCount}
-                  footnote={runningTaskCount > 0 ? '当前队列存在运行中或排队任务' : '当前没有活动中的测试任务'}
-                  icon={Activity}
-                  color="bg-accent"
-                />
-                <StatCard
-                  label="测试资产总数"
-                  value={assetCount}
-                  footnote={assetCount > 0 ? `已登记 ${assetCount} 个真实测试资产` : '当前尚未登记测试资产'}
-                  icon={Database}
-                  color="bg-text-secondary"
-                />
-              </div>
-
-              {/* Main Dashboard Layout */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                {/* Recent Executions */}
-                <div className="lg:col-span-2 glass-card overflow-hidden dashboard-panel">
-                  <div className="p-6 border-b border-border flex justify-between items-center">
-                    <h3 className="font-bold">最近测试执行</h3>
-                    <button className="text-xs text-accent font-bold flex items-center gap-1 hover:underline">
-                      查看全部 <ChevronRight size={14} />
-                    </button>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left data-table">
-                      <thead>
-                        <tr>
-                          <th className="table-header">目标资产</th>
-                          <th className="table-header">测试类型</th>
-                          <th className="table-header">执行状态</th>
-                          <th className="table-header">测试结果</th>
-                          <th className="table-header">耗时</th>
-                        </tr>
-                      </thead>
-                      <tbody className="text-sm">
-                        {recentRuns.length === 0 ? (
-                          <tr>
-                            <td colSpan={5} className="py-12 text-center text-muted italic">未找到匹配的测试用例</td>
-                          </tr>
-                        ) : (
-                          recentRuns.map((run) => (
-                            <tr 
-                              key={run.id} 
-                              onClick={() => {
-                                const matchedCase = testCases.find((tc) => tc.id === run.test_case_id);
-                                if (matchedCase) {
-                                  setSelectedTestCase(matchedCase);
-                                  fetchHistory(matchedCase.id);
-                                }
-                              }}
-                              className="table-row cursor-pointer transition-opacity"
-                            >
-                            <td className="py-4 px-4">
-                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded bg-white/5 flex items-center justify-center">
-                                  {run.category === 'T-Box' || run.category === 'IVI' || run.category === 'Gateway'
-                                    ? <Cpu size={16} className="text-text-secondary" />
-                                    : <Car size={16} className="text-text-secondary" />}
-                                </div>
-                                <div>
-                                  <div className="font-bold">{run.asset_name || run.test_case_title}</div>
-                                  <div className="text-[10px] text-muted uppercase">{run.category} ({run.protocol})</div>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="py-4 px-4">
-                              <div className="text-xs">{run.test_case_title}</div>
-                            </td>
-                            <td className="py-4 px-4">
-                              <span className={`badge ${getExecutionStatusBadgeClass(run.task_status || 'COMPLETED')}`}>
-                                {getExecutionStatusLabel(run.task_status || 'COMPLETED')}
-                              </span>
-                            </td>
-                            <td className="py-4 px-4">
-                              {(() => {
-                                const badge = getTestResultBadge(run.result);
-                                return (
-                                  <div className={`flex items-center gap-2 ${badge.className}`}>
-                                    {badge.icon}
-                                    <span className="font-bold text-[10px]">{badge.label}</span>
-                                  </div>
-                                );
-                              })()}
-                            </td>
-                            <td className="py-4 px-4 text-text-secondary font-mono text-xs">
-                              {formatDuration(run.duration)}
-                            </td>
-                          </tr>
-                        )))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                {/* Defect Distribution */}
-                <div className="flex flex-col gap-8">
-                  <div className="glass-card p-6 flex-1">
-                    <div className="flex justify-between items-center mb-6">
-                      <h3 className="font-bold">执行趋势</h3>
-                      <div className="text-[10px] text-muted font-bold uppercase tracking-widest">过去 7 天</div>
-                    </div>
-                    <div className="h-[180px] w-full">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={trendData}>
-                          <defs>
-                            <linearGradient id="colorRuns" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor={chartAccentStrong} stopOpacity={0.3}/>
-                              <stop offset="95%" stopColor={chartAccentStrong} stopOpacity={0}/>
-                            </linearGradient>
-                          </defs>
-                          <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} vertical={false} />
-                          <XAxis 
-                            dataKey="date" 
-                            axisLine={false} 
-                            tickLine={false} 
-                            tick={{ fill: chartAxis, fontSize: 10 }} 
-                            dy={10}
-                          />
-                          <YAxis hide />
-                          <Tooltip 
-                            contentStyle={tooltipStyle}
-                            itemStyle={tooltipItemStyle}
-                          />
-                          <Area 
-                            type="monotone" 
-                            dataKey="runs" 
-                            stroke={chartAccentStrong} 
-                            fillOpacity={1} 
-                            fill="url(#colorRuns)" 
-                            strokeWidth={2}
-                          />
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
-
-                  <div className="glass-card p-6 flex-1">
-                    <div className="flex justify-between items-center mb-8">
-                      <h3 className="font-bold">缺陷分布</h3>
-                      <MoreHorizontal size={18} className="text-muted" />
-                    </div>
-                  <div className="space-y-6">
-                    {dashboardDefectDistribution.map((item, i) => (
-                      <div key={i} className="space-y-2">
-                        <div className="flex justify-between text-xs font-bold">
-                          <div className="flex items-center gap-2">
-                            <div className={`w-1.5 h-1.5 rounded-full ${item.color}`} />
-                            <span>{item.label}</span>
-                          </div>
-                          <span>{item.count}</span>
-                        </div>
-                        <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                          <motion.div 
-                            initial={{ width: 0 }}
-                            animate={{ width: `${totalDashboardDefects > 0 ? (item.count / totalDashboardDefects) * 100 : 0}%` }}
-                            transition={{ duration: 1, delay: i * 0.1 }}
-                            className={`h-full ${item.color}`}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <button onClick={() => setView('defects')} className="w-full mt-8 bg-card border border-border py-2 rounded-lg text-xs font-bold hover:bg-border transition-colors">
-                    查看诊断报告
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Automation Rules */}
-            <div className="glass-card p-8">
-              <h3 className="font-bold mb-2">自动化测试规则</h3>
-              <p className="text-xs text-text-secondary mb-8">管理 ECU 固件与车辆网络的流水线触发器。</p>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="flex justify-between items-center p-4 rounded-xl border border-border bg-white/2">
-                  <div>
-                    <div className="font-bold text-sm mb-1">遇到安全关键 DTC 时中止</div>
-                    <div className="text-[10px] text-muted">如果抛出严重的故障码，则自动停止仿真测试。</div>
-                  </div>
-                  <div 
-                    onClick={() => toggleSetting('abort_on_critical_dtc')}
-                    className={`w-10 h-5 rounded-full relative cursor-pointer transition-colors ${settings.abort_on_critical_dtc ? 'bg-accent' : 'bg-white/10'}`}
-                  >
-                    <motion.div 
-                      animate={{ x: settings.abort_on_critical_dtc ? 20 : 2 }}
-                      className="absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm" 
-                    />
-                  </div>
-                </div>
-
-                <div className="flex justify-between items-center p-4 rounded-xl border border-border bg-white/2">
-                  <div>
-                    <div className="font-bold text-sm mb-1">PR 需通过 SIL 验证</div>
-                    <div className="text-[10px] text-muted">强制对所有 ECU 固件的代码提交进行软件在环 (SIL) 验证。</div>
-                  </div>
-                  <div 
-                    onClick={() => toggleSetting('pr_requires_sil')}
-                    className={`w-10 h-5 rounded-full relative cursor-pointer transition-colors ${settings.pr_requires_sil ? 'bg-accent' : 'bg-white/10'}`}
-                  >
-                    <motion.div 
-                      animate={{ x: settings.pr_requires_sil ? 20 : 2 }}
-                      className="absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm" 
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-            </>
+            <DashboardPage
+              filterProtocol={filterProtocol}
+              onChangeProtocol={setFilterProtocol}
+              onOpenLaunchTask={() => {
+                setLaunchMode('suite');
+                setIsCasePickerOpen(false);
+                if (selectedBaselineSuite) {
+                  setSelectedSuiteId(String(selectedBaselineSuite.id));
+                }
+                if (onlineAssets.length === 1) {
+                  setSelectedAssetId(String(onlineAssets[0].id));
+                }
+                setShowTaskModal(true);
+              }}
+              reliability={reliability}
+              reliabilityTrendText={reliabilityTrendText}
+              totalRuns={totalRuns}
+              severeDefectCount={severeDefectCount}
+              runningTaskCount={runningTaskCount}
+              assetCount={assetCount}
+              recentRuns={recentRuns}
+              testCases={testCases}
+              onSelectRecentRun={(run) => {
+                const matchedCase = testCases.find((testCase) => testCase.id === run.test_case_id);
+                if (matchedCase) {
+                  setSelectedTestCase(matchedCase);
+                }
+              }}
+              getExecutionStatusBadgeClass={getExecutionStatusBadgeClass}
+              getExecutionStatusLabel={getExecutionStatusLabel}
+              getTestResultBadge={getTestResultBadge}
+              formatDuration={formatDuration}
+              trendData={trendData}
+              chartAccentStrong={chartAccentStrong}
+              chartGrid={chartGrid}
+              chartAxis={chartAxis}
+              tooltipStyle={tooltipStyle}
+              tooltipItemStyle={tooltipItemStyle}
+              dashboardDefectDistribution={dashboardDefectDistribution}
+              totalDashboardDefects={totalDashboardDefects}
+              onViewDefects={() => setView('defects')}
+              settings={settings}
+              onToggleSetting={toggleSetting}
+            />
           ) : view === 'requirements' ? (
             <RequirementsPage
               requirements={requirements}
@@ -1997,20 +1166,24 @@ export default function App() {
               managementSearchQuery={managementSearchQuery}
               managementCategoryOptions={managementCategoryOptions}
               managementSecurityDomainOptions={managementSecurityDomainOptions}
-              managementFilteredTestCases={managementFilteredTestCases}
+              managementFilteredTestCases={managementPageItems}
+              managementPage={managementPage}
+              managementPageSize={MANAGEMENT_PAGE_SIZE}
+              managementTotal={managementTotal}
+              managementTotalPages={managementTotalPages}
+              managementIsFetching={managementPageData.isFetching}
               setManagementCategoryFilter={setManagementCategoryFilter}
               setManagementSecurityDomainFilter={setManagementSecurityDomainFilter}
               setManagementAutomationFilter={setManagementAutomationFilter}
               setManagementSearchQuery={setManagementSearchQuery}
+              onChangePage={(page) => setManagementPage(Math.max(1, Math.min(page, managementTotalPages)))}
               onOpenImport={() => setShowImportModal(true)}
               onOpenCreate={() => setShowCreateModal(true)}
               onViewCase={(tc) => {
-                setShowEditModal(false);
                 setSelectedTestCase(tc);
               }}
               onEditCase={(tc) => {
                 setSelectedTestCase(tc);
-                setShowEditModal(true);
               }}
               onDeleteCase={(id) => requestDeleteTestCase(id)}
             />
@@ -2028,348 +1201,43 @@ export default function App() {
               onDeleteSuite={(suiteId) => deleteSuite(suiteId)}
             />
           ) : view === 'running' ? (
-            <div className="space-y-8">
-              <div className="flex justify-between items-end">
-                <div>
-                  <h2 className="text-2xl font-bold mb-2">运行中测试任务</h2>
-                  <p className="text-sm text-text-secondary">当前正在执行的 HIL/SIL 仿真任务实时监控。</p>
-                </div>
-                <div className="flex items-center gap-2 bg-success/10 text-success px-3 py-1.5 rounded-lg border border-success/20">
-                  <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
-                  <span className="text-[10px] font-bold uppercase">集群状态: 正常</span>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-4">
-                {activeExecutionTasks.map((task) => {
-                  const progress = task.total_items > 0 ? Math.round((task.completed_items / task.total_items) * 100) : 0;
-                  const title = task.type === 'suite' ? task.suite_name : task.test_case_title;
-                  const subtitle = task.type === 'suite'
-                    ? `测试套件 • ${task.total_items} 条用例`
-                    : `${task.asset_name || '未绑定资产'} • ${task.current_case_title || task.test_case_title || '单用例任务'}`;
-
-                  return (
-                    <div key={`task-${task.id}`} className="glass-card p-6 flex items-center gap-6">
-                      <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center text-accent">
-                        {task.type === 'suite' ? <Layers3 size={24} /> : <Activity size={24} />}
-                      </div>
-                      <div className="flex-1">
-                        <div className="flex justify-between items-start mb-2">
-                          <div>
-                            <h4 className="font-bold text-lg">{title || `任务 #${task.id}`}</h4>
-                            <p className="text-xs text-muted uppercase font-bold tracking-wider">{subtitle}</p>
-                          </div>
-                          <div className="text-right">
-                            <div className="text-xs font-bold text-accent mb-1">进度: {progress}%</div>
-                            <div className="w-32 h-1.5 bg-white/5 rounded-full overflow-hidden">
-                              <motion.div
-                                initial={{ width: 0 }}
-                                animate={{ width: `${progress}%` }}
-                                className="h-full bg-accent"
-                              />
-                            </div>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-4 text-[10px] text-muted font-mono">
-                          <span>状态: {getExecutionStatusLabel(task.status)}</span>
-                          <span>完成: {task.completed_items}/{task.total_items}</span>
-                          <span>通过: {task.passed_items}</span>
-                          <span>失败: {task.failed_items}</span>
-                          <span>{task.stop_on_failure ? '策略: 失败即停' : '策略: 全部执行'}</span>
-                          <span>执行器: {task.executor || 'python'}</span>
-                          <span className={getFailureCategoryMeta(task.failure_category).className}>分类: {getFailureCategoryMeta(task.failure_category).label}</span>
-                          <span className="text-accent">{task.current_case_title ? `当前: ${task.current_case_title}` : (normalizeExecutionStatus(task.status) === 'PENDING' ? '等待调度' : '执行中')}</span>
-                        </div>
-                        {task.error_message && (
-                          <div className="mt-2 text-[10px] text-danger font-medium">{task.error_message}</div>
-                        )}
-                        {task.retry_count ? (
-                          <div className="mt-2 text-[10px] text-muted font-medium">重试次数: {task.retry_count}</div>
-                        ) : null}
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => fetchTaskDetail(task.id)}
-                          className="px-3 py-2 rounded-lg border border-border text-text-secondary text-[10px] font-bold uppercase"
-                        >
-                          详情
-                        </button>
-                        {isExecutionActive(task.status) ? (
-                          <button
-                            onClick={() => cancelTask(task.id)}
-                            className="px-3 py-2 rounded-lg border border-danger/30 text-danger text-[10px] font-bold uppercase"
-                          >
-                            取消
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => retryTask(task.id)}
-                            disabled={!task.can_retry}
-                            title={task.can_retry ? '按原配置重新执行任务' : (task.retry_block_reason || '当前任务不可重试')}
-                            className="px-3 py-2 rounded-lg border border-accent/30 text-accent text-[10px] font-bold uppercase disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            重试
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {executionTasks.length === 0 && (
-                  <div className="glass-card p-20 flex flex-col items-center justify-center text-center space-y-4">
-                    <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center text-muted">
-                      <Activity size={32} />
-                    </div>
-                    <div>
-                      <h4 className="font-bold text-xl">暂无运行中的仿真</h4>
-                      <p className="text-muted text-sm">前往仪表盘启动新的测试任务</p>
-                    </div>
-                    <button 
-                      onClick={() => setView('dashboard')}
-                      className="px-6 py-2 bg-accent rounded-lg text-xs font-bold uppercase"
-                    >
-                      返回仪表盘
-                    </button>
-                  </div>
-                )}
-
-                {activeExecutionTasks.length === 0 && executionTasks.length > 0 && executionTasks.slice(0, 6).map((task) => {
-                  const progress = task.total_items > 0 ? Math.round((task.completed_items / task.total_items) * 100) : 0;
-                  const title = task.type === 'suite' ? task.suite_name : task.test_case_title;
-                  return (
-                    <div key={`history-task-${task.id}`} className="glass-card p-6 flex items-center gap-6 opacity-80">
-                      <div className="w-12 h-12 rounded-xl bg-white/5 flex items-center justify-center text-muted">
-                        {task.type === 'suite' ? <Layers3 size={24} /> : <Activity size={24} />}
-                      </div>
-                      <div className="flex-1">
-                        <div className="flex justify-between items-start mb-2">
-                          <div>
-                            <h4 className="font-bold text-lg">{title || `任务 #${task.id}`}</h4>
-                            <p className="text-xs text-muted uppercase font-bold tracking-wider">{task.status} • 进度 {progress}%</p>
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => fetchTaskDetail(task.id)}
-                              className="px-3 py-2 rounded-lg border border-border text-text-secondary text-[10px] font-bold uppercase"
-                            >
-                              详情
-                            </button>
-                            <button
-                              onClick={() => retryTask(task.id)}
-                              disabled={!task.can_retry}
-                              title={task.can_retry ? '按原配置重新执行任务' : (task.retry_block_reason || '当前任务不可重试')}
-                              className="px-3 py-2 rounded-lg border border-accent/30 text-accent text-[10px] font-bold uppercase disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                              重新执行
-                            </button>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-4 text-[10px] text-muted font-mono">
-                          <span>执行器: {task.executor || 'python'}</span>
-                          <span>{task.stop_on_failure ? '策略: 失败即停' : '策略: 全部执行'}</span>
-                          <span>通过: {task.passed_items}</span>
-                          <span>失败: {task.failed_items}</span>
-                          <span className={getFailureCategoryMeta(task.failure_category).className}>分类: {getFailureCategoryMeta(task.failure_category).label}</span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+            <RunningPage
+              activeExecutionTasks={activeExecutionTasks}
+              executionTasks={executionTasks}
+              getExecutionStatusLabel={getExecutionStatusLabel}
+              getFailureCategoryMeta={getFailureCategoryMeta}
+              normalizeExecutionStatus={normalizeExecutionStatus}
+              onOpenTaskDetail={(taskId) => setSelectedTaskId(taskId)}
+              onCancelTask={cancelTask}
+              onRetryTask={retryTask}
+              onReturnDashboard={() => setView('dashboard')}
+            />
           ) : view === 'defects' ? (
-            <div className="space-y-8">
-              <div className="flex justify-between items-end">
-                <div>
-                  <h2 className="text-2xl font-bold mb-2">缺陷与诊断日志</h2>
-                  <p className="text-sm text-text-secondary">从测试中捕获的 DTC 故障码与安全漏洞。</p>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={exportReport} className="px-4 py-2 rounded-lg bg-danger text-white text-xs font-bold uppercase">导出报告</button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="glass-card p-6 border-l-4 border-danger">
-                  <div className="text-[10px] font-bold text-danger uppercase mb-1">致命 (Critical)</div>
-                  <div className="text-3xl font-bold">{String(defectSummary.Critical || 0).padStart(2, '0')}</div>
-                  <div className="text-[10px] text-muted mt-2">需要立即修复的安全漏洞</div>
-                </div>
-                <div className="glass-card p-6 border-l-4 border-warning">
-                  <div className="text-[10px] font-bold text-warning uppercase mb-1">严重 (Major)</div>
-                  <div className="text-3xl font-bold">{String(defectSummary.Major || 0).padStart(2, '0')}</div>
-                  <div className="text-[10px] text-muted mt-2">影响核心功能的逻辑错误</div>
-                </div>
-                <div className="glass-card p-6 border-l-4 border-accent">
-                  <div className="text-[10px] font-bold text-accent uppercase mb-1">一般 (Minor)</div>
-                  <div className="text-3xl font-bold">{String(defectSummary.Minor || 0).padStart(2, '0')}</div>
-                  <div className="text-[10px] text-muted mt-2">非关键性的显示或性能问题</div>
-                </div>
-              </div>
-
-              <div className="glass-card overflow-hidden table-shell">
-                <table className="w-full text-left data-table">
-                  <thead>
-                    <tr className="bg-white/[0.02] text-[10px] uppercase tracking-widest font-bold text-muted">
-                      <th className="py-4 px-8 border-b border-border">缺陷 ID</th>
-                      <th className="py-4 px-4 border-b border-border">描述</th>
-                      <th className="py-4 px-4 border-b border-border">来源模块</th>
-                      <th className="py-4 px-4 border-b border-border">严重程度</th>
-                      <th className="py-4 px-4 border-b border-border">状态</th>
-                      <th className="py-4 px-4 border-b border-border">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {defects.map((defect, i) => (
-                      <React.Fragment key={i}>
-                        <tr className="hover:bg-white/[0.01] transition-colors">
-                          <td className="py-4 px-8 font-mono text-xs font-bold text-accent">{defect.id}</td>
-                          <td className="py-4 px-4 text-sm font-medium">{defect.description}</td>
-                          <td className="py-4 px-4 text-xs text-muted">{defect.module}</td>
-                          <td className="py-4 px-4">
-                            <span className={`text-[10px] font-bold px-2 py-1 rounded ${
-                              defect.severity === 'Critical' ? 'bg-danger/20 text-danger border border-danger/30' :
-                              defect.severity === 'Major' ? 'bg-warning/20 text-warning border border-warning/30' :
-                              'bg-accent/20 text-accent border border-accent/30'
-                            }`}>
-                              {defect.severity}
-                            </span>
-                          </td>
-                          <td className="py-4 px-4 text-xs font-bold uppercase">{defect.status}</td>
-                          <td className="py-4 px-4">
-                            <button 
-                              onClick={() => analyzeDefect(defect)}
-                              disabled={analyzingDefectId === defect.id}
-                              className="flex items-center gap-2 text-accent hover:text-white transition-colors text-[10px] font-bold uppercase"
-                            >
-                              {analyzingDefectId === defect.id ? (
-                                <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}>
-                                  <BrainCircuit size={14} />
-                                </motion.div>
-                              ) : <BrainCircuit size={14} />}
-                              AI 诊断
-                            </button>
-                          </td>
-                        </tr>
-                        {defectAnalysis[defect.id] && (
-                          <tr>
-                            <td colSpan={6} className="px-8 py-4 bg-accent/5 border-y border-accent/10">
-                              <div className="flex gap-4">
-                                <BrainCircuit size={20} className="text-accent shrink-0 mt-1" />
-                                <div className="text-xs text-text-secondary leading-relaxed prose prose-invert prose-sm max-w-none">
-                                  <div className="font-bold text-accent mb-2 uppercase tracking-widest">AI 智能分析报告</div>
-                                  <div dangerouslySetInnerHTML={{ __html: defectAnalysis[defect.id].replace(/\n/g, '<br/>') }} />
-                                </div>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    ))}
-                    {defects.length === 0 && (
-                      <tr>
-                        <td colSpan={5} className="py-12 text-center text-muted italic">未发现缺陷记录</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <DefectsPage
+              defects={defectsPageItems}
+              defectSummary={defectsPageSummary}
+              page={defectsPage}
+              total={defectsPageTotal}
+              totalPages={defectsPageTotalPages}
+              isFetching={defectsPageData.isFetching}
+              analyzingDefectId={analyzingDefectId}
+              defectAnalysis={defectAnalysis}
+              onAnalyzeDefect={analyzeDefect}
+              onChangePage={(page) => setDefectsPage(Math.max(1, Math.min(page, defectsPageTotalPages)))}
+              onExportReport={exportReport}
+            />
           ) : view === 'reports' ? (
-            <div className="space-y-8 pb-20">
-              <div className="flex justify-between items-end">
-                <div>
-                  <h2 className="text-2xl font-bold mb-2">测试分析报告</h2>
-                  <p className="text-sm text-text-secondary">多维度的测试质量、效率与覆盖率分析。</p>
-                </div>
-                <button onClick={exportReport} className="px-4 py-2 rounded-lg border border-border text-xs font-bold uppercase hover:bg-white/5 transition-colors">
-                  导出 PDF 报告
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <div className="glass-card p-8">
-                  <h3 className="text-sm font-bold uppercase tracking-widest text-muted mb-8">测试通过率趋势</h3>
-                  <div className="h-[300px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={trendData}>
-                        <defs>
-                          <linearGradient id="colorPass" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor={chartAccent} stopOpacity={0.3}/>
-                            <stop offset="95%" stopColor={chartAccent} stopOpacity={0}/>
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} vertical={false} />
-                        <XAxis dataKey="date" stroke={chartAxis} fontSize={10} tickLine={false} axisLine={false} />
-                        <YAxis stroke={chartAxis} fontSize={10} tickLine={false} axisLine={false} />
-                        <Tooltip 
-                          contentStyle={tooltipStyle}
-                          itemStyle={{ color: chartAccentStrong }}
-                        />
-                        <Area type="monotone" dataKey="passRate" stroke={chartAccent} fillOpacity={1} fill="url(#colorPass)" strokeWidth={2} />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                <div className="glass-card p-8">
-                  <h3 className="text-sm font-bold uppercase tracking-widest text-muted mb-8">缺陷严重程度分布</h3>
-                  <div className="h-[300px] flex items-center justify-center">
-                    <div className="grid grid-cols-2 gap-8 w-full">
-                      {[
-                        { label: 'Critical', count: 12, color: 'bg-danger' },
-                        { label: 'Major', count: 24, color: 'bg-warning' },
-                        { label: 'Minor', count: 45, color: 'bg-accent' },
-                        { label: 'Low', count: 18, color: 'bg-success' }
-                      ].map(item => (
-                        <div key={item.label} className="p-6 rounded-2xl bg-white/2 border border-border">
-                          <div className="flex items-center gap-2 mb-2">
-                            <div className={`w-2 h-2 rounded-full ${item.color}`} />
-                            <span className="text-[10px] font-bold uppercase text-muted">{item.label}</span>
-                          </div>
-                          <div className="text-2xl font-bold">{item.count}</div>
-                          <div className="text-[10px] text-muted mt-1">占总数 {Math.round(item.count / 99 * 100)}%</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="glass-card p-8">
-                <h3 className="text-sm font-bold uppercase tracking-widest text-muted mb-8">ECU 模块测试覆盖率</h3>
-                <div className="space-y-6">
-                  {coverageData.map(ecu => (
-                    <div key={ecu.name} className="space-y-2">
-                      <div className="flex justify-between items-end">
-                        <div className="flex items-center gap-3">
-                          <span className="font-bold text-sm">{ecu.name}</span>
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ${
-                            ecu.status === 'Passed' ? 'bg-success/20 text-success' :
-                            ecu.status === 'Warning' ? 'bg-warning/20 text-warning' : 'bg-danger/20 text-danger'
-                          }`}>{ecu.coverage}% 覆盖</span>
-                        </div>
-                        <span className="text-[10px] text-muted font-mono">目标: 95%</span>
-                      </div>
-                      <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
-                        <motion.div 
-                          initial={{ width: 0 }}
-                          animate={{ width: `${ecu.coverage}%` }}
-                          className={`h-full ${
-                            ecu.status === 'Passed' ? 'bg-success' :
-                            ecu.status === 'Warning' ? 'bg-warning' : 'bg-danger'
-                          }`}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                  {coverageData.length === 0 && (
-                    <div className="py-10 text-center text-muted italic">暂无覆盖率数据</div>
-                  )}
-                </div>
-              </div>
-            </div>
+            <ReportsPage
+              trendData={reportsTrendData}
+              coverageData={reportsCoverageData}
+              defectDistribution={reportDefectDistribution}
+              chartAccent={chartAccent}
+              chartAccentStrong={chartAccentStrong}
+              chartGrid={chartGrid}
+              chartAxis={chartAxis}
+              tooltipStyle={tooltipStyle}
+              onExportReport={exportReport}
+            />
           ) : (
             <AssetsPage
               assets={assets}
@@ -2384,183 +1252,16 @@ export default function App() {
         </div>
       </main>
 
-      {/* Create Modal */}
-      <AnimatePresence>
-        {showCreateModal && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-            onClick={() => setShowCreateModal(false)}
-          >
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-md p-8 bg-card modal-surface"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="flex justify-between items-start mb-6">
-                <h3 className="text-xl font-bold tracking-tighter uppercase">新建测试用例</h3>
-                <button onClick={() => setShowCreateModal(false)} className="text-muted hover:text-white">
-                  <XCircle size={24} />
-                </button>
-              </div>
-
-              <form onSubmit={createTestCase} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 scrollbar-hide">
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">用例名称</label>
-                  <input name="title" required type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="例如：BMS 热失控仿真" />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">目标模块 / 业务域</label>
-                    <select name="category" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      {CASE_CATEGORY_OPTIONS.map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </select>
-                    <div className="text-[10px] text-muted mt-1">用于检索、分组和套件编排，不直接绑定执行资产。</div>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试协议</label>
-                    <select name="protocol" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="CAN">CAN</option>
-                      <option value="DoIP">DoIP</option>
-                      <option value="Ethernet">Ethernet</option>
-                      <option value="OTA">OTA</option>
-                      <option value="V2X">V2X</option>
-                      <option value="BLE">BLE</option>
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">安全分类</label>
-                  <select name="security_domain" defaultValue="未分类" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                    {SECURITY_DOMAIN_OPTIONS.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试类型</label>
-                    <select
-                      name="type"
-                      className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none"
-                      onChange={(event) => {
-                        const form = event.currentTarget.form;
-                        if (!form) return;
-                        if (event.target.value === 'Manual') {
-                          applyManualTemplateToForm(form);
-                          setCreateScriptPath('');
-                        } else {
-                          const executorField = getFormControl<HTMLSelectElement>(form, 'executor_type');
-                          if (executorField?.value === 'manual') executorField.value = 'python';
-                        }
-                      }}
-                    >
-                      <option value="Automated">自动化 (Automated)</option>
-                      <option value="Manual">手动 (Manual)</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">自动化等级</label>
-                    <select name="automation_level" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="A">A (完全自动)</option>
-                      <option value="B">B (半自动)</option>
-                      <option value="C">C (人工交互)</option>
-                      <option value="D">D (无法自动)</option>
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试工具</label>
-                  <input
-                    name="test_tool"
-                    type="text"
-                    value={createTestTool}
-                    onChange={(e) => setCreateTestTool(e.target.value)}
-                    className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
-                    placeholder="例如：ADB, SSH, Scapy"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试输入</label>
-                  <input name="test_input" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="例如：合法OTA包、篡改后OTA包" />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">预期结果</label>
-                  <textarea name="expected_result" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none h-16" placeholder="描述预期行为..." />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">描述</label>
-                  <textarea name="description" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none h-16" placeholder="简述测试目的..." />
-                </div>
-                <div className="rounded-xl border border-border bg-white/2 p-4 space-y-4">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">执行器类型</label>
-                    <select name="executor_type" defaultValue="python" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="python">python</option>
-                      <option value="shell">shell</option>
-                      <option value="manual">manual</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">脚本路径</label>
-                    <input
-                      name="script_path"
-                      type="text"
-                      value={createScriptPath}
-                      onChange={(e) => setCreateScriptPath(e.target.value)}
-                      className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent"
-                      placeholder="例如：scripts/ssh_access_check.py"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">超时 (秒)</label>
-                    <input name="timeout_sec" defaultValue="300" type="number" min="1" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                  </div>
-                </div>
-                <div className="rounded-xl border border-border bg-white/2 p-4 space-y-3">
-                  <div className="text-[10px] uppercase font-bold text-text-secondary">执行输入需求</div>
-                  {createRequiredInputs.length === 0 ? (
-                    <div className="text-xs text-muted italic">请先填写脚本路径（或测试工具），系统会自动识别所需输入字段。</div>
-                  ) : (
-                    createRequiredInputs.map((inputKey) => {
-                      const option = REQUIRED_INPUT_OPTIONS.find((item) => item.value === inputKey);
-                      return (
-                        <div key={`create-runtime-${inputKey}`} className="rounded-xl border border-border px-3 py-3 space-y-2">
-                          <div className="text-xs font-bold">{option?.label || inputKey}</div>
-                          <div className="text-[10px] text-muted">{option?.description || '运行时由任务上下文提供。'}</div>
-                          {inputKey !== 'connection_address' && (
-                            <div className="space-y-1">
-                              <div className="text-[10px] uppercase font-bold text-text-secondary">默认值</div>
-                              <input
-                                name={`default_input_${inputKey}`}
-                                type={inputKey.toLowerCase().includes('password') ? 'password' : inputKey.endsWith('_port') ? 'number' : 'text'}
-                                min={inputKey.endsWith('_port') ? 1 : undefined}
-                                defaultValue={DEFAULT_RUNTIME_INPUT_SUGGESTIONS[inputKey] || ''}
-                                className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
-                                placeholder={option?.description}
-                              />
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">测试步骤 (每行一步)</label>
-                  <textarea name="steps" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none h-32" placeholder="步骤 1: ...&#10;步骤 2: ..." />
-                </div>
-                <button type="submit" className="w-full bg-accent py-3 rounded-lg text-xs font-bold uppercase mt-4 hover:bg-[#4433EE] transition-colors">
-                  确认创建
-                </button>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      <CreateTestCaseModal
+        showCreateModal={showCreateModal}
+        setShowCreateModal={setShowCreateModal}
+        createTestCase={createTestCase}
+        createScriptPath={createScriptPath}
+        setCreateScriptPath={setCreateScriptPath}
+        createTestTool={createTestTool}
+        setCreateTestTool={setCreateTestTool}
+        createRequiredInputs={createRequiredInputs}
+      />
 
       {/* Task Modal (Launch Test) */}
       <TaskLaunchModal
@@ -2600,368 +1301,46 @@ export default function App() {
         setStopOnFailure={setStopOnFailure}
       />
 
-      {/* Suite Modal */}
-      <AnimatePresence>
-        {showSuiteModal && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-            onClick={() => setShowSuiteModal(false)}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-2xl p-8 bg-card"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="flex justify-between items-start mb-6">
-                <h3 className="text-xl font-bold tracking-tighter uppercase">新建测试套件</h3>
-                <button onClick={() => setShowSuiteModal(false)} className="text-muted hover:text-white">
-                  <XCircle size={24} />
-                </button>
-              </div>
+      <CreateSuiteModal
+        showSuiteModal={showSuiteModal}
+        selectedSuiteCaseIds={selectedSuiteCaseIds}
+        testCases={testCases}
+        onClose={() => setShowSuiteModal(false)}
+        onSubmit={createSuite}
+        onToggleSuiteCase={toggleSuiteCase}
+      />
 
-              <form onSubmit={createSuite} className="space-y-6">
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">套件名称</label>
-                  <input name="name" required type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="例如：核心 ECU 回归套件" />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">套件说明</label>
-                  <textarea name="description" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none h-20" placeholder="描述执行目标、适用场景和覆盖范围..." />
-                </div>
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <label className="text-[10px] uppercase font-bold text-text-secondary block">包含用例</label>
-                    <span className="text-[10px] text-muted font-bold uppercase">已选 {selectedSuiteCaseIds.length}</span>
-                  </div>
-                  <div className="max-h-72 overflow-y-auto rounded-xl border border-border divide-y divide-border">
-                    {testCases.map((tc) => (
-                      <label key={tc.id} className="flex items-start gap-3 p-4 hover:bg-white/5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={selectedSuiteCaseIds.includes(tc.id)}
-                          onChange={() => toggleSuiteCase(tc.id)}
-                          className="mt-1"
-                        />
-                        <div className="flex-1">
-                          <div className="font-bold text-sm">{tc.title}</div>
-                          <div className="text-[10px] text-muted uppercase font-bold mt-1">
-                            {tc.category} • {tc.protocol} • {tc.type}
-                          </div>
-                        </div>
-                      </label>
-                    ))}
-                  </div>
-                </div>
+      <ImportCasesModal
+        showImportModal={showImportModal}
+        setShowImportModal={setShowImportModal}
+        importText={importText}
+        setImportText={setImportText}
+        onImport={handleImport}
+      />
 
-                <button type="submit" className="w-full bg-accent py-3 rounded-lg text-xs font-bold uppercase hover:bg-[#4433EE] transition-colors">
-                  创建套件
-                </button>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      <RegisterAssetModal
+        showAssetModal={showAssetModal}
+        onClose={() => setShowAssetModal(false)}
+        onSubmit={registerAsset}
+      />
 
-      {/* Import Modal */}
-      <AnimatePresence>
-        {showImportModal && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-            onClick={() => setShowImportModal(false)}
-          >
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-2xl p-8 bg-card"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="flex justify-between items-start mb-6">
-                <h3 className="text-xl font-bold tracking-tighter uppercase">批量导入测试用例</h3>
-                <button onClick={() => setShowImportModal(false)} className="text-muted hover:text-white">
-                  <XCircle size={24} />
-                </button>
-              </div>
+      <AssetDetailModal
+        asset={selectedAsset}
+        pingingAssetId={pingingAssetId}
+        isUpdatingAsset={isUpdatingAsset}
+        onClose={() => setSelectedAsset(null)}
+        onOpenEdit={() => setShowEditAssetModal(true)}
+        onDeleteAsset={deleteAsset}
+        onPingAsset={pingAsset}
+        onUpdateFirmware={updateFirmware}
+      />
 
-              <div className="space-y-4">
-                <p className="text-xs text-muted">请粘贴 Markdown 表格内容。推荐列顺序与新建表单保持一致：</p>
-                <textarea 
-                  value={importText}
-                  onChange={(e) => setImportText(e.target.value)}
-                  className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none h-64 scrollbar-hide"
-                  placeholder={`| 目标模块/业务域 | 安全分类 | 用例名称 | 测试协议 | 测试类型 | 测试输入 | 测试工具 | 测试步骤 | 预期结果 | 自动化等级 | 描述 | 执行器类型 | 脚本路径 | 超时秒数 | 默认输入(JSON) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| IVI | 访问控制 | SSH访问控制验证 | Ethernet | Automated | 系统登录IP地址 | SSH | 步骤1\\n步骤2 | 未授权账号应被拒绝 | A | 验证IVI SSH访问控制 | python | scripts/ssh_access_check.py | 300 | {"ssh_port":"22"} |`}
-                />
-                <div className="flex gap-3 pt-4">
-                  <button 
-                    onClick={() => setShowImportModal(false)}
-                    className="flex-1 px-4 py-3 rounded-lg border border-border text-xs font-bold uppercase hover:bg-white/5 transition-colors"
-                  >
-                    取消
-                  </button>
-                  <button 
-                    onClick={handleImport}
-                    disabled={!importText.trim()}
-                    className="flex-1 bg-accent text-white px-4 py-3 rounded-lg text-xs font-bold uppercase hover:bg-[#4433EE] transition-colors disabled:opacity-50"
-                  >
-                    开始导入
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* Register Asset Modal */}
-      <AnimatePresence>
-        {showAssetModal && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-            onClick={() => setShowAssetModal(false)}
-          >
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-md p-8 bg-card modal-surface"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="flex justify-between items-start mb-6">
-                <h3 className="text-xl font-bold tracking-tighter uppercase">注册新资产</h3>
-                <button onClick={() => setShowAssetModal(false)} className="text-muted hover:text-white">
-                  <XCircle size={24} />
-                </button>
-              </div>
-
-              <form onSubmit={registerAsset} className="space-y-4">
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">资产名称</label>
-                  <input name="name" required type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="例如：GW-02 (Gateway)" />
-                </div>
-                <div className="grid grid-cols-3 gap-4">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">资产类型</label>
-                    <select name="type" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="Hardware">硬件 (Hardware)</option>
-                      <option value="Simulation">仿真 (Simulation)</option>
-                      <option value="Prototype">原型车 (Prototype)</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">硬件版本</label>
-                    <input name="hardware_version" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="HW-A1" />
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">软件版本</label>
-                    <input name="software_version" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="v1.0.0" />
-                  </div>
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">连接地址</label>
-                  <input name="connection_address" type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" placeholder="例如：192.168.1.10 或 ivi-demo.local" />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">描述</label>
-                  <textarea name="description" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none h-20" placeholder="例如：IVI 主机样件，当前用于 SSH 访问控制与升级流程验证" />
-                </div>
-                <div className="text-[10px] text-muted">资产先记录基础识别信息和描述。功能点如果后面要参与调度或能力匹配，再单独建模会更合适。</div>
-                <button type="submit" className="w-full bg-accent py-3 rounded-lg text-xs font-bold uppercase mt-4 hover:bg-[#4433EE] transition-colors">
-                  确认注册
-                </button>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* Asset Detail Modal */}
-      <AnimatePresence>
-        {selectedAsset && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-            onClick={() => setSelectedAsset(null)}
-          >
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-lg p-8 bg-card modal-surface"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="flex justify-between items-start mb-6">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center text-accent">
-                    <Cpu size={24} />
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-bold tracking-tighter uppercase">{selectedAsset.name}</h3>
-                    <p className="text-[10px] text-muted uppercase font-bold tracking-widest">{selectedAsset.type} • {selectedAsset.status}</p>
-                  </div>
-                </div>
-                <button onClick={() => setSelectedAsset(null)} className="text-muted hover:text-white">
-                  <XCircle size={24} />
-                </button>
-              </div>
-
-                <div className="space-y-6">
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">硬件版本</div>
-                    <div className="font-mono text-sm">{selectedAsset.hardware_version || '-'}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">软件版本</div>
-                    <div className="font-mono text-sm">{selectedAsset.software_version || '-'}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-1">最后同步</div>
-                    <div className="text-sm">刚刚</div>
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-white/2 border border-border">
-                  <div className="text-[10px] text-muted uppercase font-bold mb-1">连接地址</div>
-                  <div className="font-mono text-sm">{selectedAsset.connection_address || '未配置'}</div>
-                </div>
-
-                {selectedAsset.description ? (
-                  <div className="p-4 rounded-xl bg-white/2 border border-border">
-                    <div className="text-[10px] text-muted uppercase font-bold mb-2">资产描述</div>
-                    <div className="text-sm text-text-secondary leading-relaxed">{selectedAsset.description}</div>
-                  </div>
-                ) : null}
-
-                <div className="space-y-3">
-                  <h4 className="text-xs uppercase font-bold text-muted tracking-widest">实时健康指标</h4>
-                  <div className="space-y-4">
-                    <div>
-                      <div className="flex justify-between text-[10px] font-bold uppercase mb-1">
-                        <span>CPU 负载</span>
-                        <span className="text-accent">24%</span>
-                      </div>
-                      <div className="h-1 bg-white/5 rounded-full overflow-hidden">
-                        <motion.div initial={{ width: 0 }} animate={{ width: '24%' }} className="h-full bg-accent" />
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-[10px] font-bold uppercase mb-1">
-                        <span>内存占用</span>
-                        <span className="text-success">12%</span>
-                      </div>
-                      <div className="h-1 bg-white/5 rounded-full overflow-hidden">
-                        <motion.div initial={{ width: 0 }} animate={{ width: '12%' }} className="h-full bg-success" />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex gap-3 pt-4">
-                  <button
-                    onClick={() => setShowEditAssetModal(true)}
-                    className="flex-1 py-3 rounded-xl border border-accent/30 text-accent font-bold text-xs uppercase hover:bg-accent/5 transition-colors"
-                  >
-                    编辑资产
-                  </button>
-                  <button 
-                    onClick={() => deleteAsset(selectedAsset.id)}
-                    className="flex-1 py-3 rounded-xl border border-danger/30 text-danger font-bold text-xs uppercase hover:bg-danger/5 transition-colors"
-                  >
-                    删除资产
-                  </button>
-                  <button 
-                    onClick={() => pingAsset(selectedAsset)}
-                    className="flex-1 py-3 rounded-xl border border-border font-bold text-xs uppercase hover:bg-white/5 transition-colors"
-                  >
-                    {pingingAssetId === selectedAsset.id ? 'Ping 中...' : 'Ping 测试'}
-                  </button>
-                  <button 
-                    onClick={() => updateFirmware(selectedAsset.name)}
-                    disabled={isUpdatingAsset}
-                    className="flex-1 py-3 rounded-xl bg-accent text-white font-bold text-xs uppercase hover:bg-[#4433EE] transition-colors disabled:opacity-50"
-                  >
-                    {isUpdatingAsset ? '正在升级...' : '固件升级'}
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* Edit Asset Modal */}
-      <AnimatePresence>
-        {showEditAssetModal && selectedAsset && (
-          <div
-            className="fixed inset-0 z-[55] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-            onClick={() => setShowEditAssetModal(false)}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-card w-full max-w-md p-8 bg-card modal-surface"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="flex justify-between items-start mb-6">
-                <h3 className="text-xl font-bold tracking-tighter uppercase">编辑资产</h3>
-                <button onClick={() => setShowEditAssetModal(false)} className="text-muted hover:text-white">
-                  <XCircle size={24} />
-                </button>
-              </div>
-
-              <form onSubmit={editAsset} className="space-y-4">
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">资产名称</label>
-                  <input name="name" required defaultValue={selectedAsset.name} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">资产类型</label>
-                    <select name="type" defaultValue={selectedAsset.type} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="Hardware">硬件 (Hardware)</option>
-                      <option value="Simulation">仿真 (Simulation)</option>
-                      <option value="Prototype">原型车 (Prototype)</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">状态</label>
-                    <select name="status" defaultValue={selectedAsset.status} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
-                      <option value="Online">Online</option>
-                      <option value="Offline">Offline</option>
-                      <option value="Busy">Busy</option>
-                    </select>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">硬件版本</label>
-                    <input name="hardware_version" defaultValue={selectedAsset.hardware_version || ''} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">软件版本</label>
-                    <input name="software_version" defaultValue={selectedAsset.software_version || ''} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                  </div>
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">连接地址</label>
-                  <input name="connection_address" defaultValue={selectedAsset.connection_address || ''} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-text-secondary mb-1 block">描述</label>
-                  <textarea name="description" defaultValue={selectedAsset.description || ''} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none h-20" />
-                </div>
-                <button type="submit" className="w-full bg-accent py-3 rounded-lg text-xs font-bold uppercase hover:bg-[#4433EE] transition-colors">
-                  保存修改
-                </button>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      <EditAssetModal
+        showEditAssetModal={showEditAssetModal}
+        asset={selectedAsset}
+        onClose={() => setShowEditAssetModal(false)}
+        onSubmit={editAsset}
+      />
 
       {/* Toasts */}
       <AnimatePresence>
@@ -2978,7 +1357,7 @@ export default function App() {
       {/* Task Detail Modal */}
       <TaskDetailModal
         selectedTaskDetail={selectedTaskDetail}
-        setSelectedTaskDetail={setSelectedTaskDetail}
+        onClose={() => setSelectedTaskId(null)}
         getExecutionStatusLabel={getExecutionStatusLabel}
         getFailureCategoryMeta={getFailureCategoryMeta}
         formatServerDateTime={formatServerDateTime}
@@ -2993,515 +1372,26 @@ export default function App() {
         submitManualTaskItemResult={submitManualTaskItemResult}
       />
 
-      <AnimatePresence>
-        {deleteTestCaseCandidate && (
-          <div
-            className="fixed inset-0 z-[140] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
-            onClick={() => {
-              if (!isDeletingTestCase) setDeleteTestCaseCandidate(null);
-            }}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.96 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.96 }}
-              transition={{ duration: 0.18, ease: "easeOut" }}
-              className="glass-card w-full max-w-md rounded-2xl bg-card p-6 modal-surface"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="text-lg font-bold">确认删除测试用例</div>
-              <div className="mt-3 text-sm text-text-secondary leading-relaxed">
-                即将删除
-                <span className="mx-1 font-semibold text-text-primary">{deleteTestCaseCandidate.title}</span>
-                ，删除后无法恢复。
-              </div>
-              <div className="mt-2 text-xs text-muted">关联需求/TARA 关系会一并解除。</div>
-              <div className="mt-6 flex items-center justify-end gap-3">
-                <button
-                  type="button"
-                  disabled={isDeletingTestCase}
-                  onClick={() => setDeleteTestCaseCandidate(null)}
-                  className="px-4 py-2 rounded-lg border border-border text-sm font-bold text-text-secondary hover:text-text-primary hover:bg-white/5 transition-colors disabled:opacity-50"
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  disabled={isDeletingTestCase}
-                  onClick={confirmDeleteTestCase}
-                  className="px-4 py-2 rounded-lg bg-danger text-white text-sm font-bold hover:bg-danger/90 transition-colors disabled:opacity-50"
-                >
-                  {isDeletingTestCase ? '删除中...' : '确认删除'}
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      <DeleteTestCaseModal
+        deleteTestCaseCandidate={deleteTestCaseCandidate}
+        isDeletingTestCase={isDeletingTestCase}
+        onClose={() => setDeleteTestCaseCandidate(null)}
+        onConfirm={confirmDeleteTestCase}
+      />
 
-      {/* Detail Drawer */}
-      <AnimatePresence>
-        {selectedTestCase && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => {
-                setShowEditModal(false);
-                setSelectedTestCase(null);
-              }}
-              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60]"
-            />
-            <motion.div
-              initial={{ x: '100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '100%' }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="fixed right-0 top-0 bottom-0 w-full max-w-xl bg-bg border-l border-border z-[70] flex flex-col shadow-2xl drawer-surface"
-            >
-              <div className="p-6 border-b border-border flex justify-between items-center">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center">
-                    {selectedTestCase.category === 'T-Box' ? <Cpu size={20} className="text-accent" /> : <Car size={20} className="text-accent" />}
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-lg leading-tight">{showEditModal ? '编辑测试用例' : selectedTestCase.title}</h3>
-                    <p className="text-xs text-muted uppercase tracking-wider font-bold">
-                      {showEditModal ? '在当前抽屉内直接修改内容' : `${selectedTestCase.category} • ${selectedTestCase.protocol}`}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => {
-                    setShowEditModal(false);
-                    setSelectedTestCase(null);
-                  }}
-                  className="p-2 hover:bg-white/5 rounded-full transition-colors"
-                >
-                  <XCircle size={24} className="text-muted" />
-                </button>
-              </div>
-
-              <form key={`${selectedTestCase.id}-${showEditModal ? 'edit' : 'view'}`} onSubmit={editTestCase} className="flex-1 overflow-y-auto p-8 space-y-8 scrollbar-hide">
-                  {/* Actions */}
-                  <div className="flex gap-3">
-                    {showEditModal ? (
-                      <>
-                        <button
-                          type="submit"
-                          className="flex-1 py-3 rounded-xl bg-accent text-white font-bold text-xs uppercase hover:bg-[#4433EE] transition-colors"
-                        >
-                          保存修改
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setShowEditModal(false)}
-                          className="px-4 py-3 rounded-xl border border-border font-bold text-xs uppercase hover:bg-white/5 transition-colors"
-                        >
-                          取消编辑
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button 
-                          type="button"
-                          onClick={() => runSimulation(selectedTestCase.id)}
-                          disabled={isRunningSimulation || normalizeExecutionStatus(selectedTestCase.status) === 'RUNNING'}
-                          className={`flex-1 py-3 rounded-xl font-bold text-xs uppercase flex items-center justify-center gap-2 transition-all ${
-                            isRunningSimulation || normalizeExecutionStatus(selectedTestCase.status) === 'RUNNING'
-                              ? 'bg-white/5 text-muted cursor-not-allowed'
-                              : 'bg-accent text-white hover:bg-[#4433EE] shadow-lg shadow-accent/20'
-                          }`}
-                        >
-                          {isRunningSimulation ? (
-                            <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}>
-                              <Activity size={16} />
-                            </motion.div>
-                          ) : <PlayCircle size={16} />}
-                          {isRunningSimulation ? '正在执行模拟...' : '立即执行测试'}
-                        </button>
-                        <button 
-                          type="button"
-                          onClick={() => setShowEditModal(true)}
-                          className="px-4 py-3 rounded-xl border border-border font-bold text-xs uppercase hover:bg-white/5 transition-colors flex items-center gap-2"
-                        >
-                          <Edit3 size={16} />
-                          编辑用例
-                        </button>
-                        <button 
-                          type="button"
-                          onClick={() => requestDeleteTestCase(selectedTestCase.id, selectedTestCase.title)}
-                          className="px-4 py-3 rounded-xl border border-danger/20 text-danger font-bold text-xs uppercase hover:bg-danger/5 transition-colors"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </>
-                    )}
-                  </div>
-
-                  {/* Simulation Terminal */}
-                  {!showEditModal && isRunningSimulation && (
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-center">
-                        <h4 className="text-xs font-bold text-muted uppercase tracking-widest">实时仿真终端</h4>
-                        <div className="flex items-center gap-2">
-                          <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
-                          <span className="text-[10px] text-accent font-bold">报文流同步中...</span>
-                        </div>
-                      </div>
-                      <div className="bg-black/40 rounded-xl border border-white/5 p-4 font-mono text-[10px] space-y-1 h-48 overflow-y-auto scrollbar-hide">
-                        {simulationLogs.length === 0 ? (
-                          <div className="text-muted italic">等待报文流...</div>
-                        ) : (
-                          simulationLogs.map((log, i) => (
-                            <div key={i} className="flex gap-3">
-                              <span className="text-muted">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
-                              <span className="text-accent">{log.message}</span>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Info Grid */}
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="p-4 rounded-xl bg-white/2 border border-border">
-                      <div className="text-[10px] text-muted uppercase font-bold mb-1">当前状态</div>
-                      <div className="flex items-center gap-2">
-                        <div className={`w-2 h-2 rounded-full ${
-                          normalizeTestResult(selectedTestCase.status) === 'PASSED' ? 'bg-success' :
-                          normalizeTestResult(selectedTestCase.status) === 'FAILED' || normalizeTestResult(selectedTestCase.status) === 'ERROR' ? 'bg-danger' :
-                          normalizeExecutionStatus(selectedTestCase.status) === 'RUNNING' ? 'bg-accent' : 'bg-warning'
-                        }`} />
-                        <span className="font-bold text-sm">{normalizeTestResult(selectedTestCase.status) || getExecutionStatusLabel(selectedTestCase.status)}</span>
-                      </div>
-                    </div>
-                    <div className="p-4 rounded-xl bg-white/2 border border-border">
-                      <div className="text-[10px] text-muted uppercase font-bold mb-1">
-                        {showEditModal ? '用例名称' : '自动化等级'}
-                      </div>
-                      {showEditModal ? (
-                        <input name="title" required defaultValue={selectedTestCase.title} type="text" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:border-accent" />
-                      ) : (
-                        <div className="font-bold text-sm">{selectedTestCase.automation_level || 'B'}</div>
-                      )}
-                    </div>
-                      <div className="p-4 rounded-xl bg-white/2 border border-border">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-1">
-                          {showEditModal ? '测试工具' : '测试工具'}
-                        </div>
-                        {showEditModal ? (
-                          <input
-                            name="test_tool"
-                            value={editTestTool}
-                            onChange={(e) => setEditTestTool(e.target.value)}
-                            type="text"
-                            className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent"
-                          />
-                        ) : (
-                          <div className="font-bold text-sm font-mono text-accent">{selectedTestCase.test_tool || '-'}</div>
-                        )}
-                      </div>
-                      <div className="p-4 rounded-xl bg-white/2 border border-border">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-1">测试类型</div>
-                      {showEditModal ? (
-                        <select
-                          name="type"
-                          defaultValue={selectedTestCase.type}
-                          className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
-                          onChange={(event) => {
-                            const form = event.currentTarget.form;
-                            if (!form) return;
-                            if (event.target.value === 'Manual') {
-                              applyManualTemplateToForm(form);
-                              setEditScriptPath('');
-                            } else {
-                              const executorField = getFormControl<HTMLSelectElement>(form, 'executor_type');
-                              if (executorField?.value === 'manual') executorField.value = 'python';
-                            }
-                          }}
-                        >
-                          <option value="Automated">自动化 (Automated)</option>
-                          <option value="Manual">手动 (Manual)</option>
-                        </select>
-                      ) : (
-                        <div className="font-bold text-sm">{selectedTestCase.type}</div>
-                      )}
-                    </div>
-                    <div className="p-4 rounded-xl bg-white/2 border border-border col-span-2">
-                      <div className="text-[10px] text-muted uppercase font-bold mb-1">安全分类</div>
-                      <div className="font-bold text-sm">{selectedTestCase.security_domain || '未分类'}</div>
-                    </div>
-                  </div>
-
-                  {showEditModal && (
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="p-4 rounded-xl bg-white/2 border border-border">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-2">目标模块 / 业务域</div>
-                        <select name="category" defaultValue={selectedTestCase.category} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
-                          {CASE_CATEGORY_OPTIONS.map((option) => (
-                            <option key={option} value={option}>{option}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="p-4 rounded-xl bg-white/2 border border-border">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-2">测试协议</div>
-                        <select name="protocol" defaultValue={selectedTestCase.protocol} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
-                          <option value="CAN">CAN</option>
-                          <option value="DoIP">DoIP</option>
-                          <option value="Ethernet">Ethernet</option>
-                          <option value="OTA">OTA</option>
-                          <option value="V2X">V2X</option>
-                          <option value="BLE">BLE</option>
-                        </select>
-                      </div>
-                      <div className="p-4 rounded-xl bg-white/2 border border-border">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-2">安全分类</div>
-                        <select name="security_domain" defaultValue={selectedTestCase.security_domain || '未分类'} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
-                          {SECURITY_DOMAIN_OPTIONS.map((option) => (
-                            <option key={option} value={option}>{option}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="p-4 rounded-xl bg-white/2 border border-border">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-2">自动化等级</div>
-                        <select name="automation_level" defaultValue={selectedTestCase.automation_level || 'B'} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
-                          <option value="A">A (完全自动)</option>
-                          <option value="B">B (半自动)</option>
-                          <option value="C">C (人工交互)</option>
-                          <option value="D">D (无法自动)</option>
-                        </select>
-                      </div>
-                    </div>
-                  )}
-
-                  {(selectedTestCase.expected_result || showEditModal) && (
-                    <div className="space-y-3">
-                      <h4 className="text-xs uppercase font-bold text-muted tracking-widest">预期结果</h4>
-                      {showEditModal ? (
-                        <textarea name="expected_result" defaultValue={selectedTestCase.expected_result} className="w-full bg-bg border border-border rounded-xl px-4 py-3 text-sm leading-relaxed min-h-28 focus:outline-none focus:border-accent" />
-                      ) : (
-                        <div className="text-sm text-emerald-400 leading-relaxed bg-emerald-500/5 p-4 rounded-xl border border-emerald-500/10">
-                          {selectedTestCase.expected_result}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {(selectedTestCase.test_input || showEditModal) && (
-                    <div className="space-y-3">
-                      <h4 className="text-xs uppercase font-bold text-muted tracking-widest">测试输入</h4>
-                      {showEditModal ? (
-                        <textarea name="test_input" defaultValue={selectedTestCase.test_input} className="w-full bg-bg border border-border rounded-xl px-4 py-3 text-sm leading-relaxed min-h-24 font-mono focus:outline-none focus:border-accent" />
-                      ) : (
-                        <div className="text-sm text-text-secondary leading-relaxed bg-white/2 p-4 rounded-xl border border-border font-mono">
-                          {selectedTestCase.test_input}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="space-y-3">
-                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">用例描述</h4>
-                    {showEditModal ? (
-                      <textarea name="description" defaultValue={selectedTestCase.description} className="w-full bg-bg border border-border rounded-xl px-4 py-3 text-sm leading-relaxed min-h-24 focus:outline-none focus:border-accent" />
-                    ) : (
-                      <p className="text-sm text-text-secondary leading-relaxed bg-white/2 p-4 rounded-xl border border-border">
-                        {selectedTestCase.description}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="space-y-3">
-                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">执行配置</h4>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="p-4 rounded-xl bg-white/2 border border-border">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-1">执行器</div>
-                        {showEditModal ? (
-                          <select name="executor_type" defaultValue={selectedTestCase.executor_type || 'python'} className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent">
-                            <option value="python">python</option>
-                            <option value="shell">shell</option>
-                            <option value="manual">manual</option>
-                          </select>
-                        ) : (
-                          <div className="font-bold text-sm">{selectedTestCase.executor_type || 'python'}</div>
-                        )}
-                      </div>
-                      <div className="p-4 rounded-xl bg-white/2 border border-border">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-1">超时</div>
-                        {showEditModal ? (
-                          <input name="timeout_sec" defaultValue={selectedTestCase.timeout_sec || 300} type="number" min="1" className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                        ) : (
-                          <div className="font-bold text-sm">{selectedTestCase.timeout_sec || 300}s</div>
-                        )}
-                      </div>
-                      <div className="p-4 rounded-xl bg-white/2 border border-border col-span-2">
-                        <div className="text-[10px] text-muted uppercase font-bold mb-1">脚本路径</div>
-                        {showEditModal ? (
-                          <input
-                            name="script_path"
-                            value={editScriptPath}
-                            onChange={(e) => setEditScriptPath(e.target.value)}
-                            type="text"
-                            placeholder="脚本路径，例如 scripts/ssh_access_check.py"
-                            className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-accent"
-                          />
-                        ) : (
-                          <div className="font-mono text-sm break-all">{selectedTestCase.script_path || '-'}</div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">执行输入需求</h4>
-                    {showEditModal ? (
-                      <div className="space-y-2">
-                        {editRequiredInputs.length === 0 ? (
-                          <div className="text-xs text-muted italic">脚本尚未识别出输入字段，请检查脚本路径或测试工具命名。</div>
-                        ) : (
-                          (() => {
-                            const defaults = parseDefaultRuntimeInputs(selectedTestCase.default_runtime_inputs);
-                            return editRequiredInputs.map((inputKey) => {
-                              const option = REQUIRED_INPUT_OPTIONS.find((item) => item.value === inputKey);
-                              return (
-                                <div key={inputKey} className="rounded-xl bg-white/2 border border-border px-4 py-3 space-y-3">
-                                  <div>
-                                    <div className="text-xs font-bold">{option?.label || inputKey}</div>
-                                    <div className="text-[10px] text-muted mt-1">{option?.description || '运行时由任务上下文提供。'}</div>
-                                  </div>
-                                  {inputKey !== 'connection_address' && (
-                                    <div className="space-y-1">
-                                      <div className="text-[10px] uppercase font-bold text-muted">默认值</div>
-                                      <input
-                                        name={`default_input_${inputKey}`}
-                                        type={inputKey.toLowerCase().includes('password') ? 'password' : inputKey.endsWith('_port') ? 'number' : 'text'}
-                                        min={inputKey.endsWith('_port') ? 1 : undefined}
-                                        defaultValue={defaults[inputKey] || DEFAULT_RUNTIME_INPUT_SUGGESTIONS[inputKey] || ''}
-                                        className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent"
-                                        placeholder={option?.description || '任务发起时作为默认值自动带出'}
-                                      />
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            });
-                          })()
-                        )}
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        {(() => {
-                          const defaults = parseDefaultRuntimeInputs(selectedTestCase.default_runtime_inputs);
-                          const currentInputs = resolveRuntimeInputs(selectedTestCase.script_path, selectedTestCase.test_tool, selectedTestCase.required_inputs);
-                          if (currentInputs.length === 0) {
-                            return <div className="text-xs text-muted italic">未声明额外运行时输入</div>;
-                          }
-                          return currentInputs.map((inputKey) => {
-                            const option = REQUIRED_INPUT_OPTIONS.find((item) => item.value === inputKey);
-                            const defaultValue = defaults[inputKey];
-                            return (
-                              <div key={inputKey} className="rounded-xl bg-white/2 border border-border px-4 py-3">
-                                <div className="text-xs font-bold">{option?.label || inputKey}</div>
-                                <div className="text-[10px] text-muted mt-1">{option?.description || '运行时由任务上下文提供。'}</div>
-                                {inputKey !== 'connection_address' && defaultValue && (
-                                  <div className="text-[10px] mt-2 text-text-secondary">
-                                    默认值: <span className="font-mono">{defaultValue}</span>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          });
-                        })()}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="space-y-4">
-                    <h4 className="text-xs uppercase font-bold text-muted tracking-widest">测试步骤</h4>
-                    {showEditModal ? (
-                      <textarea name="steps" defaultValue={parseCaseSteps(selectedTestCase.steps).join('\n')} className="w-full bg-bg border border-border rounded-xl px-4 py-3 text-sm font-mono min-h-40 focus:outline-none focus:border-accent" />
-                    ) : (
-                      <div className="space-y-2">
-                        {parseCaseSteps(selectedTestCase.steps).length === 0 ? (
-                          <div className="text-xs text-muted italic">未配置测试步骤</div>
-                        ) : (
-                          parseCaseSteps(selectedTestCase.steps).map((step: string, index: number) => (
-                            <div key={index} className="flex gap-3 items-start p-3 rounded-xl bg-white/2 border border-border">
-                              <div className="w-5 h-5 rounded-full bg-accent/20 text-accent flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
-                                {index + 1}
-                              </div>
-                              <span className="text-sm text-text-secondary">{step}</span>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {!showEditModal && (
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-center">
-                      <h4 className="text-xs uppercase font-bold text-muted tracking-widest">执行历史</h4>
-                      {isHistoryLoading && <Activity size={14} className="animate-spin text-accent" />}
-                    </div>
-                    
-                    <div className="space-y-3">
-                      {history.length === 0 ? (
-                        <div className="text-center py-8 text-muted text-sm italic">暂无执行记录</div>
-                      ) : (
-                        history.map((run) => (
-                          <div key={run.id} className="p-4 rounded-xl border border-border bg-white/2 hover:bg-white/5 transition-colors group">
-                            <div className="flex justify-between items-start mb-2">
-                              <div className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                                normalizeTestResult(run.result) === 'PASSED' ? 'bg-success/20 text-success' :
-                                normalizeTestResult(run.result) === 'FAILED' || normalizeTestResult(run.result) === 'ERROR' ? 'bg-danger/20 text-danger' :
-                                'bg-warning/20 text-warning'
-                              }`}>
-                                {normalizeTestResult(run.result) || run.result}
-                              </div>
-                              <span className="text-[10px] text-muted font-mono">{formatServerDateTime(run.executed_at)}</span>
-                            </div>
-                            <p className="text-xs text-text-secondary line-clamp-2 group-hover:line-clamp-none transition-all">
-                              {run.summary || run.logs || '无详细日志内容'}
-                            </p>
-                            {parseStepResults(run.step_results).length > 0 && (
-                              <div className="mt-3 space-y-2">
-                                {parseStepResults(run.step_results).map((step, index) => (
-                                  <div key={`${run.id}-${index}`} className="rounded-lg border border-border bg-white/2 px-3 py-3 space-y-1.5">
-                                    <div className="flex items-center justify-between gap-3">
-                                      <div className="min-w-0 text-sm text-text-primary">
-                                        <span className="font-semibold">{step.name}</span>
-                                        {step.command ? <span className="text-text-secondary">：<span className="font-mono break-all">{step.command}</span></span> : null}
-                                      </div>
-                                      <span className={`text-[10px] font-bold uppercase ${getStepExecutionBadge(step).className}`}>
-                                        {getStepExecutionBadge(step).label}
-                                      </span>
-                                    </div>
-                                    {step.output ? (
-                                      <div className="text-[11px] text-text-secondary">输出: <span className="font-mono break-all">{step.output}</span></div>
-                                    ) : null}
-                                    {step.security_assessment ? (
-                                      <div className="text-[11px] text-text-secondary">结论: {step.security_assessment}</div>
-                                    ) : null}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            <div className="mt-2 text-[10px] text-muted font-bold">执行人: {run.executed_by}</div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                  )}
-              </form>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
+      <TestCaseDrawer
+        selectedTestCase={selectedTestCase}
+        closeDrawer={closeTestCaseDrawer}
+        editTestCase={editTestCase}
+        requestDeleteTestCase={requestDeleteTestCase}
+        editTestTool={editTestTool}
+        setEditTestTool={setEditTestTool}
+        editScriptPath={editScriptPath}
+        setEditScriptPath={setEditScriptPath}
+        editRequiredInputs={editRequiredInputs}
+        history={history}
+        isHistoryLoading={isHistoryLoading}
+      />
     </div>
   );
 }

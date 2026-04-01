@@ -1,18 +1,21 @@
 import type { Express } from "express";
+import type { WorkerStatePayload } from "../execution/execution-worker-ipc";
+import type { ExecutionTaskService, CreateExecutionTaskPayload, RetryDecision, ExecutionTaskDetailRecord } from "../execution/execution-task-service";
 import { validateBaselineSuiteCases, writebackRequirementSatisfactionFromRun } from "../services/traceability-governance";
+import type { SqliteDb } from "../types";
 
 type TaskRouteDeps = {
-  db: any;
-  listExecutionTasks: () => any[];
-  getExecutionTaskDetail: (taskId: number) => any;
-  submitExecutionTask: (payload: any) => number | Promise<number>;
-  listTestSuites: () => any[];
-  listSuiteRuns: () => any[];
+  db: SqliteDb;
+  listExecutionTasks: () => ReturnType<ExecutionTaskService["listExecutionTasks"]>;
+  getExecutionTaskDetail: (taskId: number) => ExecutionTaskDetailRecord | null;
+  submitExecutionTask: (payload: CreateExecutionTaskPayload) => number | Promise<number>;
+  listTestSuites: () => ReturnType<ExecutionTaskService["listTestSuites"]>;
+  listSuiteRuns: () => ReturnType<ExecutionTaskService["listSuiteRuns"]>;
   cancelExecutionTask: (taskId: number) => boolean | Promise<boolean>;
-  getRetryDecision: (task: any) => { canRetry: boolean; reason: string | null };
+  getRetryDecision: (task: Parameters<ExecutionTaskService["getRetryDecision"]>[0]) => RetryDecision;
   cloneExecutionTask: (taskId: number) => { taskId: number } | { error: string } | null;
   enqueueExecutionTask: (taskId: number) => void | Promise<void>;
-  getWorkerState: () => { runningTaskId: number | null; queuedTaskIds: number[] } | Promise<{ runningTaskId: number | null; queuedTaskIds: number[] }>;
+  getWorkerState: () => WorkerStatePayload | Promise<WorkerStatePayload>;
 };
 
 export const registerTaskRoutes = (app: Express, deps: TaskRouteDeps) => {

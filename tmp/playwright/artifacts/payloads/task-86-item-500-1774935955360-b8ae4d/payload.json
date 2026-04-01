@@ -1,0 +1,72 @@
+{
+  "task": {
+    "id": 86,
+    "type": "suite",
+    "status": "RUNNING",
+    "asset_id": 5,
+    "suite_id": 9,
+    "test_case_id": null,
+    "total_items": 2,
+    "completed_items": 1,
+    "passed_items": 0,
+    "failed_items": 1,
+    "blocked_items": 0,
+    "current_test_case_id": 98,
+    "current_item_label": "升级包合法性测试",
+    "started_at": "2026-03-31 05:45:55",
+    "finished_at": null,
+    "initiated_by": "User",
+    "error_message": null,
+    "stop_on_failure": 0,
+    "executor": "python",
+    "source_task_id": null,
+    "retry_count": 0,
+    "runtime_inputs": "{}",
+    "failure_category": "SCRIPT"
+  },
+  "item": {
+    "id": 500,
+    "test_case_id": 98,
+    "sort_order": 2,
+    "status": "PENDING",
+    "title": "升级包合法性测试",
+    "case_type": "Automated",
+    "protocol": "OTA",
+    "category": "OTA",
+    "description": "自动校验 OTA 升级包的哈希完整性与压缩结构是否符合交付基线。",
+    "test_input": "升级包hash验证、签名验证",
+    "test_tool": "签名工具",
+    "expected_result": "升级包应通过完整性和签名验证",
+    "steps": "[\"步骤1：1)检查升级包完整性（hash）\", \"步骤2：2)验证升级包签名合法性\"]",
+    "executor_type": "python",
+    "script_path": "scripts/ota_package_integrity_check.py",
+    "command_template": "",
+    "args_template": "",
+    "timeout_sec": "300",
+    "required_inputs": "[\"ota_package_path\", \"ota_expected_sha256\"]",
+    "default_runtime_inputs": "{}",
+    "asset_name": "ADAS",
+    "connection_address": "192.168.10.30"
+  },
+  "runtimeInputs": {
+    "connection_address": "192.168.10.30"
+  },
+  "testCase": {
+    "id": 98,
+    "title": "升级包合法性测试",
+    "category": "OTA",
+    "protocol": "OTA",
+    "description": "自动校验 OTA 升级包的哈希完整性与压缩结构是否符合交付基线。",
+    "test_input": "升级包hash验证、签名验证",
+    "test_tool": "签名工具",
+    "expected_result": "升级包应通过完整性和签名验证",
+    "required_inputs": "[\"ota_package_path\", \"ota_expected_sha256\"]"
+  },
+  "artifact_dirs": {
+    "root": "/Users/lutaixue/Desktop/Applications/xsq/tools/test-platform/tmp/playwright/artifacts",
+    "payload_dir": "/Users/lutaixue/Desktop/Applications/xsq/tools/test-platform/tmp/playwright/artifacts/payloads/task-86-item-500-1774935955360-b8ae4d",
+    "adb_push_dir": "/Users/lutaixue/Desktop/Applications/xsq/tools/test-platform/tmp/playwright/artifacts/adb-push/task-86-item-500-1774935955360-717516",
+    "adb_pull_dir": "/Users/lutaixue/Desktop/Applications/xsq/tools/test-platform/tmp/playwright/artifacts/adb-pull/task-86-item-500-1774935955361-b696d0",
+    "logs_dir": "/Users/lutaixue/Desktop/Applications/xsq/tools/test-platform/tmp/playwright/artifacts/logs/task-86-item-500-1774935955361-ce1410"
+  }
+}

@@ -1,9 +1,11 @@
 import type {
   Asset,
+  DashboardBootstrapPayload,
   Defect,
   ExecutionTask,
   ExecutionTaskDetail,
   ManualTaskItemResultPayload,
+  PaginatedResponse,
   RecentRun,
   ReverificationTodo,
   Requirement,
@@ -51,11 +53,39 @@ async function request<T>(url: string, options: RequestOptions = {}): Promise<T>
 }
 
 export const apiClient = {
+  getBootstrapData: (signal?: AbortSignal) => request<DashboardBootstrapPayload>("/api/bootstrap", { signal }),
   getTestCases: (signal?: AbortSignal) => request<TestCase[]>("/api/test-cases", { signal }),
+  getTestCasesPage: (
+    page: number,
+    pageSize: number,
+    filters: {
+      search?: string;
+      category?: string;
+      securityDomain?: string;
+      automationLevel?: string;
+    },
+    signal?: AbortSignal,
+  ) => {
+    const searchParams = new URLSearchParams({
+      page: String(page),
+      pageSize: String(pageSize),
+    });
+    if (filters.search) searchParams.set("search", filters.search);
+    if (filters.category && filters.category !== "All") searchParams.set("category", filters.category);
+    if (filters.securityDomain && filters.securityDomain !== "All") searchParams.set("securityDomain", filters.securityDomain);
+    if (filters.automationLevel && filters.automationLevel !== "All") searchParams.set("automationLevel", filters.automationLevel);
+
+    return request<PaginatedResponse<TestCase>>(`/api/test-cases/page?${searchParams.toString()}`, { signal });
+  },
   getStats: (signal?: AbortSignal) => request<Stats>("/api/stats", { signal }),
   getTrend: (signal?: AbortSignal) => request<Array<{ date: string; passRate: number; runs: number }>>("/api/stats/trend", { signal }),
   getCoverage: (signal?: AbortSignal) => request<Array<{ name: string; coverage: number; status: string }>>("/api/stats/coverage", { signal }),
   getDefects: (signal?: AbortSignal) => request<Defect[]>("/api/defects", { signal }),
+  getDefectsPage: (page: number, pageSize: number, signal?: AbortSignal) =>
+    request<PaginatedResponse<Defect> & { summary: Record<string, number> }>(
+      `/api/defects/page?page=${encodeURIComponent(String(page))}&pageSize=${encodeURIComponent(String(pageSize))}`,
+      { signal },
+    ),
   getAssets: (signal?: AbortSignal) => request<Asset[]>("/api/assets", { signal }),
   getSettings: (signal?: AbortSignal) => request<SettingsMap>("/api/settings", { signal }),
   getRequirements: (signal?: AbortSignal) => request<Requirement[]>("/api/requirements", { signal }),

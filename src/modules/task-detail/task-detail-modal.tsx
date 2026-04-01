@@ -1,11 +1,11 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Activity, XCircle } from "lucide-react";
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useState } from "react";
 import type { CanonicalTestResult, ExecutionStatus, ExecutionTaskDetail, ManualTaskItemResultPayload, StepExecutionResult } from "../../api/types";
 
 type TaskDetailModalProps = {
   selectedTaskDetail: ExecutionTaskDetail | null;
-  setSelectedTaskDetail: Dispatch<SetStateAction<ExecutionTaskDetail | null>>;
+  onClose: () => void;
   getExecutionStatusLabel: (status?: string | null) => string;
   getFailureCategoryMeta: (category?: string | null) => { label: string; className: string };
   formatServerDateTime: (value?: string | null) => string;
@@ -23,7 +23,7 @@ type TaskDetailModalProps = {
 export const TaskDetailModal = (props: TaskDetailModalProps) => {
   const {
     selectedTaskDetail,
-    setSelectedTaskDetail,
+    onClose,
     getExecutionStatusLabel,
     getFailureCategoryMeta,
     formatServerDateTime,
@@ -88,7 +88,7 @@ export const TaskDetailModal = (props: TaskDetailModalProps) => {
       {selectedTaskDetail && (
         <div
           className="fixed inset-0 z-[65] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-          onClick={() => setSelectedTaskDetail(null)}
+          onClick={onClose}
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.96 }}
@@ -106,7 +106,7 @@ export const TaskDetailModal = (props: TaskDetailModalProps) => {
                   任务 #{selectedTaskDetail.task.id} • {selectedTaskDetail.task.type === "suite" ? "套件任务" : "单用例任务"} • {selectedTaskDetail.task.executor || "python"}
                 </p>
               </div>
-              <button onClick={() => setSelectedTaskDetail(null)} className="text-muted hover:text-white">
+              <button onClick={onClose} className="text-muted hover:text-white">
                 <XCircle size={24} />
               </button>
             </div>

@@ -1,38 +1,15 @@
-import { ExecutionTaskService } from "./execution-task-service";
+import {
+  ExecutionTaskService,
+  type CreateExecutionTaskPayload,
+} from "./execution-task-service";
 import { ExecutionRunner } from "./execution-runner";
 import { ExecutionOrchestrator } from "./execution-orchestrator";
-
-type ExecutionTaskRecord = {
-  id: number;
-  type: "single" | "suite";
-  status: "PENDING" | "RUNNING" | "COMPLETED" | "CANCELLED";
-  asset_id?: number | null;
-  suite_id?: number | null;
-  test_case_id?: number | null;
-  total_items: number;
-  completed_items: number;
-  passed_items: number;
-  failed_items: number;
-  blocked_items: number;
-  current_test_case_id?: number | null;
-  current_item_label?: string | null;
-  started_at: string;
-  finished_at?: string | null;
-  initiated_by?: string | null;
-  error_message?: string | null;
-  stop_on_failure?: number;
-  executor?: string | null;
-  source_task_id?: number | null;
-  retry_count?: number;
-  runtime_inputs?: string | null;
-  failure_category?: string | null;
-  can_retry?: boolean;
-  retry_block_reason?: string | null;
-};
+import type { ExecutionTaskRecord } from "../repositories";
+import type { SqliteDb } from "../types";
 
 type CreateExecutionRuntimeOptions = {
-  db: any;
-  broadcast: (data: any) => void;
+  db: SqliteDb;
+  broadcast: (data: unknown) => void;
   executionMode: string;
   executionScript?: string;
   pythonExecutable: string;
@@ -41,7 +18,7 @@ type CreateExecutionRuntimeOptions = {
   maxTaskRetries: number;
   artifactRoot: string;
   createTaskArtifactDir: (taskId: number, itemId: number, artifactType: "payloads" | "adb-push" | "adb-pull" | "logs") => string;
-  scheduleTaskArtifactCleanup: (task: any) => void;
+  scheduleTaskArtifactCleanup: (task: ExecutionTaskRecord) => void;
 };
 
 export const createExecutionRuntime = (options: CreateExecutionRuntimeOptions) => {
@@ -66,7 +43,7 @@ export const createExecutionRuntime = (options: CreateExecutionRuntimeOptions) =
   });
 
   const getRetryDecision = (task: ExecutionTaskRecord) => executionTaskService.getRetryDecision(task);
-  const decorateTaskRetryMeta = <T>(task: T): T => executionTaskService.decorateTaskRetryMeta(task as any) as T;
+  const decorateTaskRetryMeta = (task: ExecutionTaskRecord) => executionTaskService.decorateTaskRetryMeta(task);
   const listTestSuites = () => executionTaskService.listTestSuites();
   const listExecutionTasks = () => executionTaskService.listExecutionTasks();
   const getExecutionTaskDetail = (taskId: number) => executionTaskService.getExecutionTaskDetail(taskId);
@@ -97,8 +74,7 @@ export const createExecutionRuntime = (options: CreateExecutionRuntimeOptions) =
     executionOrchestrator.enqueue(taskId);
   };
 
-  type ExecutionTaskSubmitPayload = Parameters<typeof createExecutionTask>[0];
-  const submitExecutionTask = (payload: ExecutionTaskSubmitPayload) => {
+  const submitExecutionTask = (payload: CreateExecutionTaskPayload) => {
     const taskId = createExecutionTask(payload);
     enqueueExecutionTask(taskId);
     return taskId;

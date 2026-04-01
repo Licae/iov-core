@@ -4,9 +4,26 @@ import {
   removeEntityReverificationTodos,
 } from "../services/traceability-governance";
 import { normalizeAndValidateTestCasePayload, type NormalizedTestCasePayload } from "../services/test-case-quality";
+import type { SqliteDb } from "../types";
 
 type CaseRouteDeps = {
-  db: any;
+  db: SqliteDb;
+};
+
+type CountRow = {
+  count: number;
+};
+
+type TrendRow = {
+  date: string;
+  total: number;
+  passed: number;
+};
+
+type CoverageRow = {
+  name: string;
+  total: number;
+  passed: number;
 };
 
 const parseIdArray = (value: unknown) =>
@@ -24,6 +41,14 @@ const normalizeTestResult = (value?: string | null): "PASSED" | "FAILED" | "BLOC
   if (normalized === "FAILED") return "FAILED";
   if (normalized === "BLOCKED") return "BLOCKED";
   return "ERROR";
+};
+
+const parsePositiveInt = (value: unknown, fallback: number) => {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
 };
 
 export const registerCaseRoutes = (app: Express, deps: CaseRouteDeps) => {
@@ -47,6 +72,77 @@ export const registerCaseRoutes = (app: Express, deps: CaseRouteDeps) => {
       ORDER BY tc.created_at DESC
     `).all();
     res.json(cases);
+  });
+
+  app.get("/api/test-cases/page", (req, res) => {
+    const page = parsePositiveInt(req.query.page, 1);
+    const pageSize = Math.min(parsePositiveInt(req.query.pageSize, 10), 100);
+    const search = String(req.query.search ?? "").trim().toLowerCase();
+    const category = String(req.query.category ?? "All").trim();
+    const securityDomain = String(req.query.securityDomain ?? "All").trim();
+    const automationLevel = String(req.query.automationLevel ?? "All").trim();
+
+    const whereClauses: string[] = [];
+    const params: Array<string | number> = [];
+
+    if (search) {
+      whereClauses.push(`(
+        LOWER(COALESCE(tc.title, '')) LIKE ?
+        OR LOWER(COALESCE(tc.category, '')) LIKE ?
+        OR LOWER(COALESCE(NULLIF(TRIM(tc.security_domain), ''), '未分类')) LIKE ?
+        OR LOWER(COALESCE(tc.test_tool, '')) LIKE ?
+      )`);
+      const searchValue = `%${search}%`;
+      params.push(searchValue, searchValue, searchValue, searchValue);
+    }
+
+    if (category !== "All") {
+      whereClauses.push("tc.category = ?");
+      params.push(category);
+    }
+
+    if (securityDomain !== "All") {
+      whereClauses.push("COALESCE(NULLIF(TRIM(tc.security_domain), ''), '未分类') = ?");
+      params.push(securityDomain);
+    }
+
+    if (automationLevel !== "All") {
+      whereClauses.push("COALESCE(NULLIF(TRIM(tc.automation_level), ''), 'B') = ?");
+      params.push(automationLevel);
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const total = Number(
+      (db.prepare(`SELECT COUNT(*) AS count FROM test_cases tc ${whereSql}`).get(...params) as CountRow | undefined)?.count || 0,
+    );
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const offset = (page - 1) * pageSize;
+    const items = db.prepare(`
+      SELECT
+        tc.*,
+        (
+          SELECT COUNT(*)
+          FROM test_case_requirements tcr
+          WHERE tcr.test_case_id = tc.id
+        ) AS requirement_count,
+        (
+          SELECT COUNT(*)
+          FROM test_case_tara_links tctl
+          WHERE tctl.test_case_id = tc.id
+        ) AS tara_count
+      FROM test_cases tc
+      ${whereSql}
+      ORDER BY tc.created_at DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, pageSize, offset);
+
+    res.json({
+      items,
+      page,
+      pageSize,
+      total,
+      totalPages,
+    });
   });
 
   app.get("/api/test-cases/:id/links", (req, res) => {
@@ -310,10 +406,10 @@ export const registerCaseRoutes = (app: Express, deps: CaseRouteDeps) => {
       WHERE executed_at >= date('now', '-7 days')
       GROUP BY date(executed_at)
       ORDER BY date ASC
-    `).all();
+    `).all() as TrendRow[];
 
     const days = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-    const formatted = trend.map((t: any) => ({
+    const formatted = trend.map((t) => ({
       date: days[new Date(t.date).getDay()],
       passRate: t.total > 0 ? Math.round((t.passed / t.total) * 100) : 0,
       runs: t.total
@@ -330,9 +426,9 @@ export const registerCaseRoutes = (app: Express, deps: CaseRouteDeps) => {
         SUM(CASE WHEN UPPER(status) = 'PASSED' THEN 1 ELSE 0 END) as passed
       FROM test_cases
       GROUP BY category
-    `).all();
+    `).all() as CoverageRow[];
 
-    const formatted = coverage.map((c: any) => ({
+    const formatted = coverage.map((c) => ({
       name: c.name,
       coverage: c.total > 0 ? Math.round((c.passed / c.total) * 100) : 0,
       status: (c.passed / c.total) > 0.8 ? "Passed" : (c.passed / c.total) > 0.5 ? "Warning" : "Critical"

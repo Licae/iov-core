@@ -1,4 +1,4 @@
-type SqliteDb = any;
+import type { SqliteDb } from "../types";
 
 type ReverificationEntityType = "REQUIREMENT" | "TARA" | "TEST_CASE";
 

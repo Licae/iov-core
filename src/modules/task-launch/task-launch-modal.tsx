@@ -35,7 +35,7 @@ type TaskLaunchModalProps = {
   testCases: TestCase[];
   setSelectedCaseIds: Dispatch<SetStateAction<number[]>>;
   selectedLaunchRequiredInputs: string[];
-  requiredInputOptions: RequiredInputOption[];
+  requiredInputOptions: readonly RequiredInputOption[];
   selectedLaunchInputConflicts: string[];
   isRuntimeInputsOpen: boolean;
   setIsRuntimeInputsOpen: Dispatch<SetStateAction<boolean>>;

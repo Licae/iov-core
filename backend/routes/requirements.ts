@@ -7,9 +7,57 @@ import {
   markRequirementChangeImpact,
   removeEntityReverificationTodos,
 } from "../services/traceability-governance";
+import type { SqliteDb } from "../types";
 
 type RequirementRouteDeps = {
-  db: any;
+  db: SqliteDb;
+};
+
+type RequirementRow = Record<string, unknown> & {
+  linked_test_case_ids?: string | null;
+  linked_tara_ids?: string | null;
+  linked_asset_ids?: string | null;
+  test_case_count?: number;
+  tara_count?: number;
+  asset_count?: number;
+};
+
+type RequirementCoverageQueryRow = {
+  requirement_id?: number;
+  requirement_key?: string;
+  requirement_title?: string;
+  requirement_verification_status?: string | null;
+  satisfaction_status?: string | null;
+  asset_id?: number | null;
+  asset_name?: string | null;
+  tara_count?: number;
+  test_case_count?: number;
+  latest_result?: string | null;
+  latest_result_at?: string | null;
+  pending_reverification_count?: number;
+  pending_reverification_reasons?: string | null;
+};
+
+type RequirementCoverageItem = {
+  requirement_id: number;
+  requirement_key: string;
+  requirement_title: string;
+  asset_id: number | null;
+  asset_name: string | null;
+  tara_covered: boolean;
+  test_case_covered: boolean;
+  satisfaction_status: string;
+  verification_status: string;
+  latest_result: "PASSED" | "FAILED" | "BLOCKED" | "ERROR" | null;
+  latest_result_at: string | null;
+  has_recent_evidence: boolean;
+  evidence_expired: boolean;
+  evidence_expiry_days: number;
+  pending_reverification_count: number;
+  pending_reverification_reasons: string[];
+  quality_tier: "LINK_MISSING" | "NO_EVIDENCE" | "EVIDENCE_EXPIRED" | "PENDING_REVERIFICATION" | "VERIFIED_PASS" | "VERIFIED_FAIL";
+  closure_status: "COVERED" | "GAP";
+  gap_reasons: string[];
 };
 
 const parseIdArray = (value: unknown) =>
@@ -79,9 +127,9 @@ export const registerRequirementRoutes = (app: Express, deps: RequirementRouteDe
       ${hasAssetFilter ? "WHERE EXISTS (SELECT 1 FROM requirement_assets ras WHERE ras.requirement_id = r.id AND ras.asset_id = ?)" : ""}
       ORDER BY r.created_at DESC, r.id DESC
     `;
-    const rows = hasAssetFilter ? db.prepare(sql).all(assetId) : db.prepare(sql).all();
+    const rows = (hasAssetFilter ? db.prepare(sql).all(assetId) : db.prepare(sql).all()) as RequirementRow[];
 
-    const normalized = rows.map((row: any) => {
+    const normalized = rows.map((row) => {
       const {
         linked_test_case_ids,
         linked_tara_ids,
@@ -172,9 +220,9 @@ export const registerRequirementRoutes = (app: Express, deps: RequirementRouteDe
       ${hasAssetFilter ? "WHERE a.id = ?" : ""}
       ORDER BY (a.name IS NULL) ASC, a.name ASC, r.id ASC
     `;
-    const rows = hasAssetFilter ? db.prepare(sql).all(assetId) : db.prepare(sql).all();
+    const rows = (hasAssetFilter ? db.prepare(sql).all(assetId) : db.prepare(sql).all()) as RequirementCoverageQueryRow[];
 
-    const normalized = rows.map((row: any) => {
+    const normalized: RequirementCoverageItem[] = rows.map((row) => {
       const toTimestamp = (value?: string | null) => {
         if (!value) return 0;
         const parsed = new Date(value).getTime();
@@ -251,20 +299,20 @@ export const registerRequirementRoutes = (app: Express, deps: RequirementRouteDe
       };
     });
 
-    const uncovered = normalized.filter((item: any) => item.closure_status === "GAP");
+    const uncovered = normalized.filter((item) => item.closure_status === "GAP");
     const uniqueAssets = new Set(
       normalized
-        .map((item: any) => Number(item.asset_id || 0))
+        .map((item) => Number(item.asset_id || 0))
         .filter((value: number) => value > 0),
     );
 
     return res.json({
       summary: {
         total: normalized.length,
-        covered: normalized.filter((item: any) => item.closure_status === "COVERED").length,
+        covered: normalized.filter((item) => item.closure_status === "COVERED").length,
         gap: uncovered.length,
         asset_count: uniqueAssets.size,
-        pending_reverification: normalized.filter((item: any) => Number(item.pending_reverification_count || 0) > 0).length,
+        pending_reverification: normalized.filter((item) => Number(item.pending_reverification_count || 0) > 0).length,
       },
       rows: normalized,
       uncovered,

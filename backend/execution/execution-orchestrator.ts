@@ -1,6 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "child_process";
 import { ExecutionWorker } from "./execution-worker";
 import { writebackRequirementSatisfactionFromRun } from "../services/traceability-governance";
+import { ExecutionRunner } from "./execution-runner";
 import {
   EXECUTION_STATUS,
   FAILURE_CATEGORY,
@@ -9,21 +10,48 @@ import {
   normalizeTestResult,
   type ExecutionStatus,
 } from "./execution-types";
+import type { ExecutionTaskRecord } from "../repositories";
+import type { SqliteDb } from "../types";
+
+type ExecutionTaskRunItem = {
+  id: number;
+  test_case_id: number;
+  sort_order: number;
+  status: string;
+  title: string;
+  case_type?: string | null;
+  protocol?: string | null;
+  category?: string | null;
+  description?: string | null;
+  test_input?: string | null;
+  test_tool?: string | null;
+  expected_result?: string | null;
+  steps?: string | null;
+  executor_type?: string | null;
+  script_path?: string | null;
+  command_template?: string | null;
+  args_template?: string | null;
+  timeout_sec?: number | null;
+  required_inputs?: string | null;
+  default_runtime_inputs?: string | null;
+  asset_name?: string | null;
+  connection_address?: string | null;
+};
 
 type ExecutionOrchestratorOptions = {
-  db: any;
-  executionRunner: any;
-  broadcast: (data: any) => void;
-  decorateTaskRetryMeta: <T>(task: T) => T;
-  scheduleTaskArtifactCleanup: (task: any) => void;
+  db: SqliteDb;
+  executionRunner: ExecutionRunner;
+  broadcast: (data: unknown) => void;
+  decorateTaskRetryMeta: (task: ExecutionTaskRecord) => ExecutionTaskRecord;
+  scheduleTaskArtifactCleanup: (task: ExecutionTaskRecord) => void;
 };
 
 export class ExecutionOrchestrator {
-  private readonly db: any;
-  private readonly executionRunner: any;
-  private readonly broadcast: (data: any) => void;
-  private readonly decorateTaskRetryMeta: <T>(task: T) => T;
-  private readonly scheduleTaskArtifactCleanup: (task: any) => void;
+  private readonly db: SqliteDb;
+  private readonly executionRunner: ExecutionRunner;
+  private readonly broadcast: (data: unknown) => void;
+  private readonly decorateTaskRetryMeta: (task: ExecutionTaskRecord) => ExecutionTaskRecord;
+  private readonly scheduleTaskArtifactCleanup: (task: ExecutionTaskRecord) => void;
   private readonly activeTaskRuns = new Map<number, NodeJS.Timeout[]>();
   private readonly activeTaskChildren = new Map<number, ChildProcessWithoutNullStreams>();
   private readonly worker: ExecutionWorker;
@@ -48,7 +76,7 @@ export class ExecutionOrchestrator {
           WHERE id = ? AND status IN ('PENDING', 'RUNNING')
         `).run(error instanceof Error ? error.message : "Worker execution failed", taskId);
         this.updateTaskCounters(taskId);
-        const task = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId);
+        const task = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
         if (task) {
           this.broadcast({ type: "EXECUTION_TASK_COMPLETED", task: this.decorateTaskRetryMeta(task) });
         }
@@ -105,7 +133,7 @@ export class ExecutionOrchestrator {
   }
 
   cancelTask(taskId: number) {
-    const task = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as { status: ExecutionStatus } | undefined;
+    const task = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
     if (!task || ![EXECUTION_STATUS.PENDING, EXECUTION_STATUS.RUNNING].includes(task.status)) {
       return false;
     }
@@ -150,7 +178,10 @@ export class ExecutionOrchestrator {
       this.db.prepare("UPDATE test_cases SET status = 'Draft' WHERE id = ?").run(item.test_case_id);
     });
 
-    const cancelledTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId);
+    const cancelledTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
+    if (!cancelledTask) {
+      return true;
+    }
     this.broadcast({
       type: "EXECUTION_TASK_COMPLETED",
       task: this.decorateTaskRetryMeta(cancelledTask),
@@ -211,7 +242,7 @@ export class ExecutionOrchestrator {
   }
 
   private async scheduleExecutionTask(taskId: number) {
-    const task = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId);
+    const task = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
     if (!task) return;
     if (task.status === EXECUTION_STATUS.CANCELLED) return;
 
@@ -245,7 +276,7 @@ export class ExecutionOrchestrator {
       LEFT JOIN assets a ON a.id = et.asset_id
       WHERE eti.task_id = ? AND UPPER(COALESCE(eti.status, 'PENDING')) IN ('PENDING', 'QUEUED')
       ORDER BY eti.sort_order ASC, eti.id ASC
-    `).all(taskId) as Array<Record<string, any>>;
+    `).all(taskId) as ExecutionTaskRunItem[];
 
     if (items.length === 0) {
       this.db.prepare("UPDATE execution_tasks SET status = 'COMPLETED', finished_at = CURRENT_TIMESTAMP, failure_category = 'NONE' WHERE id = ?").run(taskId);
@@ -266,7 +297,12 @@ export class ExecutionOrchestrator {
         WHERE id = ?
       `).run(status, errorMessage || null, finalFailureCategory, taskId);
 
-      const completedTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId);
+      const completedTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
+      if (!completedTask) {
+        this.activeTaskRuns.delete(taskId);
+        this.activeTaskChildren.delete(taskId);
+        return;
+      }
       this.broadcast({ type: "EXECUTION_TASK_COMPLETED", task: this.decorateTaskRetryMeta(completedTask) });
       this.scheduleTaskArtifactCleanup(completedTask);
       this.activeTaskRuns.delete(taskId);
@@ -289,7 +325,7 @@ export class ExecutionOrchestrator {
         const item = items[index];
         const isManualCase = String(item.case_type || "").trim().toLowerCase() === "manual" ||
           String(item.executor_type || "").trim().toLowerCase() === "manual";
-        const latestTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as { status: ExecutionStatus } | undefined;
+        const latestTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
         if (!latestTask || latestTask.status === EXECUTION_STATUS.CANCELLED) {
           break;
         }
@@ -311,7 +347,7 @@ export class ExecutionOrchestrator {
 
         this.broadcast({
           type: "EXECUTION_TASK_UPDATED",
-          task: this.decorateTaskRetryMeta(this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId)),
+          task: this.decorateTaskRetryMeta(this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord),
         });
         if (isManualCase) {
           this.db.prepare("UPDATE execution_tasks SET executor = ? WHERE id = ?").run("manual", taskId);
@@ -325,7 +361,7 @@ export class ExecutionOrchestrator {
           return;
         }
 
-        const refreshedTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId);
+        const refreshedTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord;
         const outcome = await this.executionRunner.runWithPreflight(
           refreshedTask,
           item,
@@ -345,7 +381,7 @@ export class ExecutionOrchestrator {
         const stepResults = outcome.stepResults;
         const failureCategory = outcome.failureCategory;
 
-        const currentTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as { status: ExecutionStatus; stop_on_failure?: number } | undefined;
+        const currentTask = this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
         if (!currentTask || currentTask.status === EXECUTION_STATUS.CANCELLED) {
           break;
         }
@@ -408,7 +444,7 @@ export class ExecutionOrchestrator {
 
           this.broadcast({
             type: "EXECUTION_TASK_UPDATED",
-            task: this.decorateTaskRetryMeta(this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId)),
+            task: this.decorateTaskRetryMeta(this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord),
           });
         }
 

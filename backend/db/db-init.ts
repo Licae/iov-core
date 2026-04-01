@@ -1,17 +1,19 @@
+import type { SqliteDb } from "../types";
+
 const SCHEMA_VERSION = 5;
 
 type Migration = {
   id: string;
-  up: (db: any) => void;
+  up: (db: SqliteDb) => void;
 };
 
-const safeExec = (db: any, sql: string) => {
+const safeExec = (db: SqliteDb, sql: string) => {
   try {
     db.exec(sql);
   } catch {}
 };
 
-const ensureSchemaVersionTable = (db: any) => {
+const ensureSchemaVersionTable = (db: SqliteDb) => {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
       version INTEGER NOT NULL,
@@ -24,13 +26,13 @@ const ensureSchemaVersionTable = (db: any) => {
   }
 };
 
-const setSchemaVersion = (db: any, version: number) => {
+const setSchemaVersion = (db: SqliteDb, version: number) => {
   const latest = db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").get() as { version?: number } | undefined;
   if ((latest?.version || 0) >= version) return;
   db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(version);
 };
 
-const ensureSchemaMigrationsTable = (db: any) => {
+const ensureSchemaMigrationsTable = (db: SqliteDb) => {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,
@@ -39,7 +41,7 @@ const ensureSchemaMigrationsTable = (db: any) => {
   `);
 };
 
-const runMigrations = (db: any, migrations: Migration[]) => {
+const runMigrations = (db: SqliteDb, migrations: Migration[]) => {
   ensureSchemaMigrationsTable(db);
   const hasMigration = db.prepare("SELECT 1 FROM schema_migrations WHERE id = ? LIMIT 1");
   const insertMigration = db.prepare("INSERT INTO schema_migrations (id) VALUES (?)");
@@ -54,7 +56,7 @@ const runMigrations = (db: any, migrations: Migration[]) => {
   });
 };
 
-const ensurePerformanceIndexes = (db: any) => {
+const ensurePerformanceIndexes = (db: SqliteDb) => {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_test_cases_created_at ON test_cases(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_test_cases_category ON test_cases(category);
@@ -76,7 +78,7 @@ const ensurePerformanceIndexes = (db: any) => {
   `);
 };
 
-const ensureArchiveTables = (db: any) => {
+const ensureArchiveTables = (db: SqliteDb) => {
   db.exec(`
     CREATE TABLE IF NOT EXISTS test_runs_archive (
       id INTEGER PRIMARY KEY,
@@ -137,7 +139,7 @@ const ensureArchiveTables = (db: any) => {
   `);
 };
 
-const ensureTraceabilityTables = (db: any) => {
+const ensureTraceabilityTables = (db: SqliteDb) => {
   db.exec(`
     CREATE TABLE IF NOT EXISTS requirements (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,7 +260,7 @@ const migrations: Migration[] = [
 ];
 
 export const archiveHistoricalTestRuns = (
-  db: any,
+  db: SqliteDb,
   options?: { retentionDays?: number; batchSize?: number },
 ) => {
   const retentionDays = Math.max(1, Number(options?.retentionDays ?? 30));
@@ -298,7 +300,7 @@ export const archiveHistoricalTestRuns = (
 };
 
 export const archiveHistoricalExecutionRecords = (
-  db: any,
+  db: SqliteDb,
   options?: { retentionDays?: number; batchSize?: number },
 ) => {
   const retentionDays = Math.max(1, Number(options?.retentionDays ?? 30));
@@ -363,7 +365,7 @@ export const archiveHistoricalExecutionRecords = (
   };
 };
 
-export const initializeDatabase = (db: any) => {
+export const initializeDatabase = (db: SqliteDb) => {
   ensureSchemaVersionTable(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS test_cases (
@@ -672,7 +674,7 @@ export const initializeDatabase = (db: any) => {
 };
 
 export const runDatabaseMaintenance = (
-  db: any,
+  db: SqliteDb,
   options?: { retentionDays?: number; batchSize?: number },
 ) => {
   const runArchive = archiveHistoricalTestRuns(db, options);

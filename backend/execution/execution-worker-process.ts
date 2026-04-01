@@ -54,7 +54,7 @@ const safeSend = (payload: WorkerResponse) => {
 
 const runtime = createExecutionRuntime({
   db,
-  broadcast: (data: any) => safeSend({ type: "event", data }),
+  broadcast: (data: unknown) => safeSend({ type: "event", data }),
   executionMode,
   executionScript: process.env.EXECUTION_SCRIPT,
   pythonExecutable: process.env.PYTHON_EXECUTABLE || "python3",

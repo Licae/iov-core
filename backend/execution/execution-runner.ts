@@ -99,7 +99,7 @@ type RunnerOutcome = {
 type TaskExecutor = (
   task: ExecutionTaskRecord,
   item: ExecutionTaskItemRecord,
-  broadcast: (data: any) => void,
+  broadcast: (data: unknown) => void,
   registerChild: (child: ChildProcessWithoutNullStreams | null) => void,
 ) => Promise<ExecutorResult>;
 
@@ -117,7 +117,7 @@ type ExecutionRunnerOptions = {
   enabledExecutorPlugins?: string[];
   artifactRoot: string;
   createTaskArtifactDir: (taskId: number, itemId: number, artifactType: "payloads" | "adb-push" | "adb-pull" | "logs") => string;
-  broadcast: (data: any) => void;
+  broadcast: (data: unknown) => void;
 };
 
 const normalizeStepResult = (value?: string | null): StepExecutionResult["result"] => {
@@ -138,7 +138,7 @@ export class ExecutionRunner {
   private readonly pythonSecurityRunner: string;
   private readonly artifactRoot: string;
   private readonly createTaskArtifactDir: (taskId: number, itemId: number, artifactType: "payloads" | "adb-push" | "adb-pull" | "logs") => string;
-  private readonly broadcast: (data: any) => void;
+  private readonly broadcast: (data: unknown) => void;
   private readonly commandAvailabilityCache = new Map<string, { checkedAt: number; available: boolean; stdout: string; stderr: string }>();
   private readonly adapterRegistry: ExecutorAdapter[];
 
@@ -656,10 +656,10 @@ export class ExecutionRunner {
       const normalizedLogs = parsed.logs || result.logs;
       const normalizedSummary = parsed.summary || parsed.logs || result.summary || "";
       const parsedSteps = Array.isArray(parsed.steps)
-        ? parsed.steps.map((step: any) => ({
+        ? parsed.steps.map((step: Record<string, unknown>) => ({
             ...step,
-            result: normalizeStepResult(step?.result),
-            command_result: step?.command_result ? normalizeStepResult(step.command_result) : undefined,
+            result: normalizeStepResult(String(step?.result || "")),
+            command_result: step?.command_result ? normalizeStepResult(String(step.command_result || "")) : undefined,
           } as StepExecutionResult))
         : result.stepResults;
       const normalizedStepResults = this.enrichStepResultsWithEvidence(parsedSteps, normalizedResult, normalizedLogs, fallbackEvidence);
@@ -685,7 +685,7 @@ export class ExecutionRunner {
     command: string,
     task: ExecutionTaskRecord,
     item: ExecutionTaskItemRecord,
-    broadcastEvent: (data: any) => void,
+    broadcastEvent: (data: unknown) => void,
     registerChild: (child: ChildProcessWithoutNullStreams | null) => void,
   ): Promise<ExecutorResult> {
     return new Promise<ExecutorResult>((resolve) => {

@@ -68,7 +68,7 @@ export type CommandEvidence = {
 export type TaskExecutor = (
   task: ExecutionTaskRecord,
   item: ExecutionTaskItemRecord,
-  broadcast: (data: any) => void,
+  broadcast: (data: unknown) => void,
   registerChild: (child: ChildProcessWithoutNullStreams | null) => void,
 ) => Promise<ExecutorResult>;
 

@@ -1,11 +1,15 @@
 import { useMemo } from "react";
-import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "./client";
 import type {
   Asset,
+  CoveragePoint,
+  DashboardBootstrapPayload,
   Defect,
   ExecutionTask,
+  ExecutionTaskDetail,
   ManualTaskItemResultPayload,
+  PaginatedResponse,
   RecentRun,
   Requirement,
   RequirementCoverageSnapshot,
@@ -14,24 +18,22 @@ import type {
   SuiteRun,
   TaraItem,
   TestCase,
+  TestRun,
   TestSuite,
+  TrendPoint,
 } from "./types";
 
 export const queryKeys = {
-  cases: ["cases"] as const,
-  stats: ["stats"] as const,
-  trend: ["trend"] as const,
-  coverage: ["coverage"] as const,
+  bootstrap: ["bootstrap"] as const,
   defects: ["defects"] as const,
-  assets: ["assets"] as const,
-  settings: ["settings"] as const,
-  requirements: ["requirements"] as const,
-  requirementCoverage: ["requirement-coverage"] as const,
-  taraItems: ["tara-items"] as const,
-  suites: ["suites"] as const,
-  suiteRuns: ["suite-runs"] as const,
-  tasks: ["tasks"] as const,
-  recentRuns: ["recent-runs"] as const,
+  defectsPage: (page: number, pageSize: number) => ["defects", "page", page, pageSize] as const,
+  reports: ["reports"] as const,
+  testCases: ["test-cases"] as const,
+  testCasesPage: (
+    page: number,
+    pageSize: number,
+    filters: { search: string; category: string; securityDomain: string; automationLevel: string },
+  ) => ["test-cases", "page", page, pageSize, filters.search, filters.category, filters.securityDomain, filters.automationLevel] as const,
   history: (testCaseId: number) => ["history", testCaseId] as const,
   taskDetail: (taskId: number) => ["task-detail", taskId] as const,
 };
@@ -39,8 +41,8 @@ export const queryKeys = {
 type BootstrapData = {
   testCases: TestCase[];
   stats: Stats | null;
-  trendData: Array<{ date: string; passRate: number; runs: number }>;
-  coverageData: Array<{ name: string; coverage: number; status: string }>;
+  trendData: TrendPoint[];
+  coverageData: CoveragePoint[];
   defects: Defect[];
   assets: Asset[];
   settings: SettingsMap;
@@ -55,67 +57,213 @@ type BootstrapData = {
   isFetching: boolean;
 };
 
+type DefectsPageData = {
+  defects: Defect[];
+  summary: Record<string, number>;
+  pagination: PaginatedResponse<Defect>;
+  isLoading: boolean;
+  isFetching: boolean;
+};
+
+type ReportsPageData = {
+  stats: Stats | null;
+  trendData: TrendPoint[];
+  coverageData: CoveragePoint[];
+  defects: Defect[];
+  isLoading: boolean;
+  isFetching: boolean;
+};
+
+type ManagementPageData = {
+  testCases: TestCase[];
+  pagination: PaginatedResponse<TestCase>;
+  isLoading: boolean;
+  isFetching: boolean;
+};
+
+type TestCaseHistoryData = {
+  history: TestRun[];
+  isLoading: boolean;
+  isFetching: boolean;
+  refetch: () => Promise<unknown>;
+};
+
+type TaskDetailData = {
+  detail: ExecutionTaskDetail | null;
+  isLoading: boolean;
+  isFetching: boolean;
+  error: Error | null;
+  refetch: () => Promise<unknown>;
+};
+
 const queryConfig = { staleTime: 10_000, gcTime: 5 * 60_000 };
+const emptyBootstrapPayload: DashboardBootstrapPayload = {
+  testCases: [],
+  stats: null,
+  trendData: [],
+  coverageData: [],
+  defects: [],
+  assets: [],
+  settings: { abort_on_critical_dtc: true, pr_requires_sil: true },
+  requirements: [],
+  requirementCoverage: { summary: { total: 0, covered: 0, gap: 0, asset_count: 0 }, rows: [], uncovered: [] },
+  taraItems: [],
+  testSuites: [],
+  suiteRuns: [],
+  executionTasks: [],
+  recentRuns: [],
+};
 
 export const useBootstrapData = (): BootstrapData => {
-  const results = useQueries({
-    queries: [
-      { queryKey: queryKeys.cases, queryFn: ({ signal }) => apiClient.getTestCases(signal), ...queryConfig },
-      { queryKey: queryKeys.stats, queryFn: ({ signal }) => apiClient.getStats(signal), ...queryConfig },
-      { queryKey: queryKeys.trend, queryFn: ({ signal }) => apiClient.getTrend(signal), ...queryConfig },
-      { queryKey: queryKeys.coverage, queryFn: ({ signal }) => apiClient.getCoverage(signal), ...queryConfig },
-      { queryKey: queryKeys.defects, queryFn: ({ signal }) => apiClient.getDefects(signal), ...queryConfig },
-      { queryKey: queryKeys.assets, queryFn: ({ signal }) => apiClient.getAssets(signal), ...queryConfig },
-      { queryKey: queryKeys.settings, queryFn: ({ signal }) => apiClient.getSettings(signal), ...queryConfig },
-      { queryKey: queryKeys.requirements, queryFn: ({ signal }) => apiClient.getRequirements(signal), ...queryConfig },
-      { queryKey: queryKeys.taraItems, queryFn: ({ signal }) => apiClient.getTaraItems(signal), ...queryConfig },
-      { queryKey: queryKeys.suites, queryFn: ({ signal }) => apiClient.getSuites(signal), ...queryConfig },
-      { queryKey: queryKeys.suiteRuns, queryFn: ({ signal }) => apiClient.getSuiteRuns(signal), ...queryConfig },
-      { queryKey: queryKeys.tasks, queryFn: ({ signal }) => apiClient.getTasks(signal), ...queryConfig },
-      { queryKey: queryKeys.recentRuns, queryFn: ({ signal }) => apiClient.getRecentRuns(signal), ...queryConfig },
-      { queryKey: queryKeys.requirementCoverage, queryFn: ({ signal }) => apiClient.getRequirementCoverage(signal), ...queryConfig },
-    ],
+  const bootstrapQuery = useQuery({
+    queryKey: queryKeys.bootstrap,
+    queryFn: ({ signal }) => apiClient.getBootstrapData(signal),
+    ...queryConfig,
   });
+  const data = bootstrapQuery.data || emptyBootstrapPayload;
 
   return useMemo(
     () => ({
-      testCases: (results[0].data as TestCase[]) || [],
-      stats: (results[1].data as Stats) || null,
-      trendData: (results[2].data as Array<{ date: string; passRate: number; runs: number }>) || [],
-      coverageData: (results[3].data as Array<{ name: string; coverage: number; status: string }>) || [],
-      defects: (results[4].data as Defect[]) || [],
-      assets: (results[5].data as Asset[]) || [],
-      settings: (results[6].data as SettingsMap) || { abort_on_critical_dtc: true, pr_requires_sil: true },
-      requirements: (results[7].data as Requirement[]) || [],
-      taraItems: (results[8].data as TaraItem[]) || [],
-      testSuites: (results[9].data as TestSuite[]) || [],
-      suiteRuns: (results[10].data as SuiteRun[]) || [],
-      executionTasks: (results[11].data as ExecutionTask[]) || [],
-      recentRuns: (results[12].data as RecentRun[]) || [],
-      requirementCoverage: (results[13].data as RequirementCoverageSnapshot) || { summary: { total: 0, covered: 0, gap: 0, asset_count: 0 }, rows: [], uncovered: [] },
-      isLoading: results.some((query) => query.isLoading),
-      isFetching: results.some((query) => query.isFetching),
+      testCases: data.testCases,
+      stats: data.stats,
+      trendData: data.trendData,
+      coverageData: data.coverageData,
+      defects: data.defects,
+      assets: data.assets,
+      settings: data.settings,
+      requirements: data.requirements,
+      taraItems: data.taraItems,
+      testSuites: data.testSuites,
+      suiteRuns: data.suiteRuns,
+      executionTasks: data.executionTasks,
+      recentRuns: data.recentRuns,
+      requirementCoverage: data.requirementCoverage,
+      isLoading: bootstrapQuery.isLoading,
+      isFetching: bootstrapQuery.isFetching,
     }),
-    [results],
+    [bootstrapQuery.isFetching, bootstrapQuery.isLoading, data],
   );
 };
 
-const allRefreshKeys = [
-  queryKeys.cases,
-  queryKeys.stats,
-  queryKeys.trend,
-  queryKeys.coverage,
-  queryKeys.defects,
-  queryKeys.assets,
-  queryKeys.settings,
-  queryKeys.requirements,
-  queryKeys.requirementCoverage,
-  queryKeys.taraItems,
-  queryKeys.suites,
-  queryKeys.suiteRuns,
-  queryKeys.tasks,
-  queryKeys.recentRuns,
-] as const;
+export const useDefectsPageData = (enabled: boolean, page: number, pageSize: number): DefectsPageData => {
+  const defectsQuery = useQuery({
+    queryKey: queryKeys.defectsPage(page, pageSize),
+    queryFn: ({ signal }) => apiClient.getDefectsPage(page, pageSize, signal),
+    enabled,
+    ...queryConfig,
+  });
+
+  return {
+    defects: defectsQuery.data?.items || [],
+    summary: defectsQuery.data?.summary || {},
+    pagination: defectsQuery.data || {
+      items: [],
+      page,
+      pageSize,
+      total: 0,
+      totalPages: 1,
+    },
+    isLoading: defectsQuery.isLoading,
+    isFetching: defectsQuery.isFetching,
+  };
+};
+
+export const useReportsPageData = (enabled: boolean): ReportsPageData => {
+  const reportsQuery = useQuery({
+    queryKey: queryKeys.reports,
+    queryFn: ({ signal }) =>
+      Promise.all([
+        apiClient.getStats(signal),
+        apiClient.getTrend(signal),
+        apiClient.getCoverage(signal),
+        apiClient.getDefects(signal),
+      ]).then(([stats, trendData, coverageData, defects]) => ({
+        stats,
+        trendData,
+        coverageData,
+        defects,
+      })),
+    enabled,
+    ...queryConfig,
+  });
+
+  return {
+    stats: reportsQuery.data?.stats || null,
+    trendData: reportsQuery.data?.trendData || [],
+    coverageData: reportsQuery.data?.coverageData || [],
+    defects: reportsQuery.data?.defects || [],
+    isLoading: reportsQuery.isLoading,
+    isFetching: reportsQuery.isFetching,
+  };
+};
+
+export const useManagementPageData = (
+  enabled: boolean,
+  page: number,
+  pageSize: number,
+  filters: { search: string; category: string; securityDomain: string; automationLevel: string },
+): ManagementPageData => {
+  const managementQuery = useQuery({
+    queryKey: queryKeys.testCasesPage(page, pageSize, filters),
+    queryFn: ({ signal }) =>
+      apiClient.getTestCasesPage(page, pageSize, {
+        search: filters.search,
+        category: filters.category,
+        securityDomain: filters.securityDomain,
+        automationLevel: filters.automationLevel,
+      }, signal),
+    enabled,
+    ...queryConfig,
+  });
+
+  return {
+    testCases: managementQuery.data?.items || [],
+    pagination: managementQuery.data || {
+      items: [],
+      page,
+      pageSize,
+      total: 0,
+      totalPages: 1,
+    },
+    isLoading: managementQuery.isLoading,
+    isFetching: managementQuery.isFetching,
+  };
+};
+
+export const useTestCaseHistory = (enabled: boolean, testCaseId: number | null): TestCaseHistoryData => {
+  const historyQuery = useQuery({
+    queryKey: queryKeys.history(testCaseId || 0),
+    queryFn: ({ signal }) => apiClient.getHistory(testCaseId || 0, signal),
+    enabled: enabled && Boolean(testCaseId),
+    ...queryConfig,
+  });
+
+  return {
+    history: historyQuery.data || [],
+    isLoading: historyQuery.isLoading,
+    isFetching: historyQuery.isFetching,
+    refetch: () => historyQuery.refetch(),
+  };
+};
+
+export const useTaskDetailData = (enabled: boolean, taskId: number | null): TaskDetailData => {
+  const taskDetailQuery = useQuery({
+    queryKey: queryKeys.taskDetail(taskId || 0),
+    queryFn: ({ signal }) => apiClient.getTaskDetail(taskId || 0, signal),
+    enabled: enabled && Boolean(taskId),
+    ...queryConfig,
+  });
+
+  return {
+    detail: taskDetailQuery.data || null,
+    isLoading: taskDetailQuery.isLoading,
+    isFetching: taskDetailQuery.isFetching,
+    error: taskDetailQuery.error instanceof Error ? taskDetailQuery.error : null,
+    refetch: () => taskDetailQuery.refetch(),
+  };
+};
+
+const allRefreshKeys = [queryKeys.bootstrap, queryKeys.defects, queryKeys.reports, queryKeys.testCases] as const;
 
 export const useRefreshAllData = () => {
   const queryClient = useQueryClient();
@@ -126,18 +274,7 @@ export const useRefreshAllData = () => {
   };
 };
 
-const executionRefreshKeys = [
-  queryKeys.tasks,
-  queryKeys.recentRuns,
-  queryKeys.suiteRuns,
-  queryKeys.stats,
-  queryKeys.trend,
-  queryKeys.coverage,
-  queryKeys.cases,
-  queryKeys.requirements,
-  queryKeys.requirementCoverage,
-  queryKeys.taraItems,
-] as const;
+const executionRefreshKeys = [queryKeys.bootstrap, queryKeys.reports] as const;
 
 export const useRefreshExecutionData = () => {
   const queryClient = useQueryClient();
@@ -156,35 +293,25 @@ export const useAppMutations = () => {
   const queryClient = useQueryClient();
 
   const invalidateCases = async () => {
-    await invalidateKeys(queryClient, [
-      queryKeys.cases,
-      queryKeys.stats,
-      queryKeys.trend,
-      queryKeys.coverage,
-      queryKeys.recentRuns,
-      queryKeys.tasks,
-      queryKeys.requirements,
-      queryKeys.requirementCoverage,
-      queryKeys.taraItems,
-    ]);
+    await invalidateKeys(queryClient, [queryKeys.bootstrap, queryKeys.reports, queryKeys.testCases]);
   };
   const invalidateExecution = async () => {
     await invalidateKeys(queryClient, executionRefreshKeys);
   };
   const invalidateSuites = async () => {
-    await invalidateKeys(queryClient, [queryKeys.suites, queryKeys.suiteRuns, queryKeys.tasks]);
+    await invalidateKeys(queryClient, [queryKeys.bootstrap, queryKeys.reports]);
   };
   const invalidateAssets = async () => {
-    await invalidateKeys(queryClient, [queryKeys.assets, queryKeys.tasks, queryKeys.recentRuns]);
+    await invalidateKeys(queryClient, [queryKeys.bootstrap]);
   };
   const invalidateDefects = async () => {
-    await invalidateKeys(queryClient, [queryKeys.defects]);
+    await invalidateKeys(queryClient, [queryKeys.bootstrap, queryKeys.defects, queryKeys.reports]);
   };
   const invalidateSettings = async () => {
-    await invalidateKeys(queryClient, [queryKeys.settings]);
+    await invalidateKeys(queryClient, [queryKeys.bootstrap]);
   };
   const invalidateTraceability = async () => {
-    await invalidateKeys(queryClient, [queryKeys.cases, queryKeys.requirements, queryKeys.requirementCoverage, queryKeys.taraItems]);
+    await invalidateKeys(queryClient, [queryKeys.bootstrap, queryKeys.reports]);
   };
 
   return {

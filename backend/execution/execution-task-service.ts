@@ -9,37 +9,16 @@ import {
   type FailureCategory,
   type TestResult,
 } from "./execution-types";
-import { ExecutionTaskRepository } from "../repositories";
+import {
+  ExecutionTaskRepository,
+  type ExecutionTaskRecord,
+  type ExecutionTaskDetailItemRecord,
+  type SuiteRunRecord,
+  type TestSuiteRecord,
+} from "../repositories";
+import type { SqliteDb } from "../types";
 
-type ExecutionTaskRecord = {
-  id: number;
-  type: "single" | "suite";
-  status: ExecutionStatus;
-  asset_id?: number | null;
-  suite_id?: number | null;
-  test_case_id?: number | null;
-  total_items: number;
-  completed_items: number;
-  passed_items: number;
-  failed_items: number;
-  blocked_items: number;
-  current_test_case_id?: number | null;
-  current_item_label?: string | null;
-  started_at: string;
-  finished_at?: string | null;
-  initiated_by?: string | null;
-  error_message?: string | null;
-  stop_on_failure?: number;
-  executor?: string | null;
-  source_task_id?: number | null;
-  retry_count?: number;
-  runtime_inputs?: string | null;
-  failure_category?: FailureCategory | string | null;
-  can_retry?: boolean;
-  retry_block_reason?: string | null;
-};
-
-type CreateExecutionTaskPayload = {
+export type CreateExecutionTaskPayload = {
   type: "single" | "suite";
   assetId?: number | null;
   suiteId?: number | null;
@@ -52,19 +31,24 @@ type CreateExecutionTaskPayload = {
   runtimeInputs?: Record<string, string>;
 };
 
-type RetryDecision = {
+export type RetryDecision = {
   canRetry: boolean;
   reason: string | null;
 };
 
 type ExecutionTaskServiceOptions = {
-  db: any;
+  db: SqliteDb;
   executionMode: string;
   maxTaskRetries: number;
 };
 
+export type ExecutionTaskDetailRecord = {
+  task: ExecutionTaskRecord;
+  items: ExecutionTaskDetailItemRecord[];
+};
+
 export class ExecutionTaskService {
-  private readonly db: any;
+  private readonly db: SqliteDb;
   private readonly executionMode: string;
   private readonly maxTaskRetries: number;
   private readonly repository: ExecutionTaskRepository;
@@ -76,15 +60,15 @@ export class ExecutionTaskService {
     this.repository = new ExecutionTaskRepository(this.db);
   }
 
-  listTestSuites() {
+  listTestSuites(): TestSuiteRecord[] {
     return this.repository.listTestSuites();
   }
 
-  listExecutionTasks() {
-    return this.repository.listExecutionTasks().map((task: ExecutionTaskRecord) => this.decorateTaskRetryMeta(task));
+  listExecutionTasks(): ExecutionTaskRecord[] {
+    return this.repository.listExecutionTasks().map((task) => this.decorateTaskRetryMeta(task));
   }
 
-  getExecutionTaskDetail(taskId: number) {
+  getExecutionTaskDetail(taskId: number): ExecutionTaskDetailRecord | null {
     const task = this.repository.getExecutionTaskDetailMeta(taskId);
 
     if (!task) {
@@ -93,10 +77,10 @@ export class ExecutionTaskService {
 
     const items = this.repository.getExecutionTaskDetailItems(taskId);
 
-    return { task: this.decorateTaskRetryMeta(task as ExecutionTaskRecord), items };
+    return { task: this.decorateTaskRetryMeta(task), items };
   }
 
-  listSuiteRuns() {
+  listSuiteRuns(): SuiteRunRecord[] {
     return this.repository.listSuiteRuns();
   }
 
@@ -137,7 +121,7 @@ export class ExecutionTaskService {
   }
 
   cloneExecutionTask(taskId: number) {
-    const task = this.repository.getExecutionTaskById(taskId) as ExecutionTaskRecord | undefined;
+    const task = this.repository.getExecutionTaskById(taskId);
     if (!task) return null;
     if ([EXECUTION_STATUS.PENDING, EXECUTION_STATUS.RUNNING].includes(task.status)) return { error: "Task is still active" } as const;
 

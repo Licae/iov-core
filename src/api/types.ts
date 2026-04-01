@@ -153,6 +153,26 @@ export interface Stats {
   results: { result: string; count: number }[];
 }
 
+export interface TrendPoint {
+  date: string;
+  passRate: number;
+  runs: number;
+}
+
+export interface CoveragePoint {
+  name: string;
+  coverage: number;
+  status: string;
+}
+
+export interface PaginatedResponse<T> {
+  items: T[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
 export interface TestSuite {
   id: number;
   name: string;
@@ -293,3 +313,20 @@ export interface Asset {
 }
 
 export type SettingsMap = Record<string, boolean>;
+
+export interface DashboardBootstrapPayload {
+  testCases: TestCase[];
+  stats: Stats | null;
+  trendData: TrendPoint[];
+  coverageData: CoveragePoint[];
+  defects: Defect[];
+  assets: Asset[];
+  settings: SettingsMap;
+  requirements: Requirement[];
+  requirementCoverage: RequirementCoverageSnapshot;
+  taraItems: TaraItem[];
+  testSuites: TestSuite[];
+  suiteRuns: SuiteRun[];
+  executionTasks: ExecutionTask[];
+  recentRuns: RecentRun[];
+}

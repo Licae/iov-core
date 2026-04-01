@@ -4,6 +4,10 @@ import path from "path";
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { spawn } from "child_process";
+import type { WorkerStatePayload } from "../execution/execution-worker-ipc";
+import type { ExecutionTaskService, CreateExecutionTaskPayload, RetryDecision, ExecutionTaskDetailRecord } from "../execution/execution-task-service";
+import type { DefectRecord, DefectAnalysisResult } from "../services/report-service";
+import type { SqliteDb } from "../types";
 import {
   registerTaskRoutes,
   registerCaseRoutes,
@@ -13,22 +17,22 @@ import {
   registerTaraRoutes,
 } from "../routes";
 
-type BroadcastFn = (data: any) => void;
+type BroadcastFn = (data: unknown) => void;
 type PingAddressFn = (address: string) => Promise<{ success: boolean; latency_ms?: number; output: string }>;
 
 type ApiRouteDeps = {
-  db: any;
-  listExecutionTasks: () => any[];
-  getExecutionTaskDetail: (taskId: number) => any;
-  submitExecutionTask: (payload: any) => number | Promise<number>;
-  listTestSuites: () => any[];
-  listSuiteRuns: () => any[];
+  db: SqliteDb;
+  listExecutionTasks: () => ReturnType<ExecutionTaskService["listExecutionTasks"]>;
+  getExecutionTaskDetail: (taskId: number) => ExecutionTaskDetailRecord | null;
+  submitExecutionTask: (payload: CreateExecutionTaskPayload) => number | Promise<number>;
+  listTestSuites: () => ReturnType<ExecutionTaskService["listTestSuites"]>;
+  listSuiteRuns: () => ReturnType<ExecutionTaskService["listSuiteRuns"]>;
   cancelExecutionTask: (taskId: number) => boolean | Promise<boolean>;
-  getRetryDecision: (task: any) => { canRetry: boolean; reason: string | null };
+  getRetryDecision: (task: Parameters<ExecutionTaskService["getRetryDecision"]>[0]) => RetryDecision;
   cloneExecutionTask: (taskId: number) => { taskId: number } | { error: string } | null;
   enqueueExecutionTask: (taskId: number) => void | Promise<void>;
-  getWorkerState: () => { runningTaskId: number | null; queuedTaskIds: number[] } | Promise<{ runningTaskId: number | null; queuedTaskIds: number[] }>;
-  generateDefectAnalysis: (defect: any) => Promise<any>;
+  getWorkerState: () => WorkerStatePayload | Promise<WorkerStatePayload>;
+  generateDefectAnalysis: (defect: DefectRecord) => Promise<DefectAnalysisResult>;
   buildReportHtml: () => string;
   pingAddress: PingAddressFn;
 };
@@ -49,7 +53,7 @@ export const attachRealtimeBroadcast = (server: http.Server): BroadcastFn => {
     ws.on("close", () => clients.delete(ws));
   });
 
-  return (data: any) => {
+  return (data: unknown) => {
     const message = JSON.stringify(data);
     clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
@@ -126,6 +130,9 @@ export const registerApiRoutes = (app: Express, deps: ApiRouteDeps) => {
   });
   registerSystemRoutes(app, {
     db,
+    listExecutionTasks,
+    listTestSuites,
+    listSuiteRuns,
     generateDefectAnalysis,
     buildReportHtml,
   });

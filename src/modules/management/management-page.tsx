@@ -9,10 +9,16 @@ type ManagementPageProps = {
   managementCategoryOptions: string[];
   managementSecurityDomainOptions: string[];
   managementFilteredTestCases: TestCase[];
+  managementPage: number;
+  managementPageSize: number;
+  managementTotal: number;
+  managementTotalPages: number;
+  managementIsFetching?: boolean;
   setManagementCategoryFilter: (value: string) => void;
   setManagementSecurityDomainFilter: (value: string) => void;
   setManagementAutomationFilter: (value: string) => void;
   setManagementSearchQuery: (value: string) => void;
+  onChangePage: (page: number) => void;
   onOpenImport: () => void;
   onOpenCreate: () => void;
   onViewCase: (tc: TestCase) => void;
@@ -28,10 +34,16 @@ export const ManagementPage = ({
   managementCategoryOptions,
   managementSecurityDomainOptions,
   managementFilteredTestCases,
+  managementPage,
+  managementPageSize,
+  managementTotal,
+  managementTotalPages,
+  managementIsFetching = false,
   setManagementCategoryFilter,
   setManagementSecurityDomainFilter,
   setManagementAutomationFilter,
   setManagementSearchQuery,
+  onChangePage,
   onOpenImport,
   onOpenCreate,
   onViewCase,
@@ -126,7 +138,7 @@ export const ManagementPage = ({
                 onClick={() => onViewCase(tc)}
               >
                 <td className="px-6 py-4 text-xs text-muted font-mono">
-                  {index + 1}
+                  {(managementPage - 1) * managementPageSize + index + 1}
                 </td>
                 <td className="px-8 py-4">
                   <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-white/5 text-muted">
@@ -172,8 +184,36 @@ export const ManagementPage = ({
                 </td>
               </tr>
             ))}
+            {managementFilteredTestCases.length === 0 ? (
+              <tr>
+                <td colSpan={10} className="py-12 text-center text-muted italic">未找到匹配的测试用例</td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
+
+        <div className="flex items-center justify-between gap-4 px-8 py-4 border-t border-border bg-white/[0.02]">
+          <div className="text-xs text-muted">
+            共 {managementTotal} 条用例，当前第 {Math.max(managementPage, 1)} / {Math.max(managementTotalPages, 1)} 页
+            {managementIsFetching ? " · 正在刷新..." : ""}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => onChangePage(managementPage - 1)}
+              disabled={managementPage <= 1}
+              className="px-3 py-2 rounded-lg border border-border text-[10px] font-bold uppercase disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              上一页
+            </button>
+            <button
+              onClick={() => onChangePage(managementPage + 1)}
+              disabled={managementPage >= managementTotalPages}
+              className="px-3 py-2 rounded-lg border border-border text-[10px] font-bold uppercase disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              下一页
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

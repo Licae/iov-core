@@ -1,4 +1,5 @@
 import { validateBaselineSuiteCases } from "./traceability-governance";
+import type { SqliteDb } from "../types";
 
 type SeedOptions = {
   enabled: boolean;
@@ -45,7 +46,7 @@ export const SECURITY_BASELINE_CASE_TITLES_DEFAULT = [
   "账户锁定",
 ] as const;
 
-export const seedDemoDataIfNeeded = (db: any, options: SeedOptions) => {
+export const seedDemoDataIfNeeded = (db: SqliteDb, options: SeedOptions) => {
   const count = db.prepare("SELECT COUNT(*) as count FROM test_cases").get().count;
   if (!options.enabled || count !== 0) {
     return false;
@@ -164,7 +165,7 @@ export const seedDemoDataIfNeeded = (db: any, options: SeedOptions) => {
 };
 
 export const ensureSecurityBaselineSuite = (
-  db: any,
+  db: SqliteDb,
   suiteName: string,
   caseTitles: string[],
 ) => {

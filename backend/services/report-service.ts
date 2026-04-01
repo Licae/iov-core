@@ -1,4 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
+import type { SqliteDb } from "../types";
 
 export type DefectRecord = {
   id: string;
@@ -7,6 +8,11 @@ export type DefectRecord = {
   severity: string;
   status: string;
   created_at?: string;
+};
+
+export type DefectAnalysisResult = {
+  analysis: string;
+  source: "fallback" | "gemini";
 };
 
 const escapeHtml = (value: string) =>
@@ -36,7 +42,7 @@ const buildFallbackDefectAnalysis = (defect: DefectRecord) => {
 };
 
 export const createDefectAnalysisGenerator = (apiKey?: string) =>
-  async (defect: DefectRecord) => {
+  async (defect: DefectRecord): Promise<DefectAnalysisResult> => {
     if (!apiKey) {
       return {
         analysis: buildFallbackDefectAnalysis(defect),
@@ -66,7 +72,7 @@ export const createDefectAnalysisGenerator = (apiKey?: string) =>
     };
   };
 
-export const createReportHtmlBuilder = (db: any) => () => {
+export const createReportHtmlBuilder = (db: SqliteDb) => () => {
   const totals = db.prepare(`
     SELECT
       COUNT(*) as totalCases,
@@ -279,4 +285,3 @@ export const createReportHtmlBuilder = (db: any) => () => {
 </body>
 </html>`;
 };
-

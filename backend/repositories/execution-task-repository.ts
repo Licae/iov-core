@@ -1,3 +1,6 @@
+import type { SqliteDb } from "../types";
+import type { ExecutionStatus } from "../execution/execution-types";
+
 export type CreateExecutionTaskRecord = {
   type: "single" | "suite";
   assetId?: number | null;
@@ -13,14 +16,99 @@ export type CreateExecutionTaskRecord = {
   retryCount?: number;
 };
 
-export class ExecutionTaskRepository {
-  private readonly db: any;
+export type ExecutionTaskRecord = {
+  id: number;
+  type: "single" | "suite";
+  status: ExecutionStatus;
+  asset_id?: number | null;
+  asset_name?: string | null;
+  suite_id?: number | null;
+  suite_name?: string | null;
+  test_case_id?: number | null;
+  test_case_title?: string | null;
+  total_items: number;
+  completed_items: number;
+  passed_items: number;
+  failed_items: number;
+  blocked_items: number;
+  current_test_case_id?: number | null;
+  current_case_title?: string | null;
+  current_item_label?: string | null;
+  started_at: string;
+  finished_at?: string | null;
+  initiated_by?: string | null;
+  error_message?: string | null;
+  stop_on_failure?: number;
+  executor?: string | null;
+  source_task_id?: number | null;
+  retry_count?: number;
+  runtime_inputs?: string | null;
+  failure_category?: string | null;
+  can_retry?: boolean;
+  retry_block_reason?: string | null;
+};
 
-  constructor(db: any) {
+export type ExecutionTaskDetailItemRecord = {
+  id: number;
+  task_id: number;
+  test_case_id: number;
+  sort_order: number;
+  status: string;
+  result?: string | null;
+  failure_category?: string | null;
+  run_id?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  title: string;
+  case_type?: string | null;
+  category?: string | null;
+  protocol?: string | null;
+  steps?: string | null;
+  executor_type?: string | null;
+  test_tool?: string | null;
+  test_input?: string | null;
+  expected_result?: string | null;
+  run_result?: string | null;
+  logs?: string | null;
+  summary?: string | null;
+  step_results?: string | null;
+  duration?: number | null;
+  executed_at?: string | null;
+};
+
+export type TestSuiteRecord = {
+  id: number;
+  name: string;
+  description: string;
+  is_baseline?: number | null;
+  created_at: string;
+  case_count: number;
+};
+
+export type SuiteRunRecord = {
+  id: number;
+  suite_id: number;
+  suite_name?: string | null;
+  status: string;
+  total_cases: number;
+  completed_cases: number;
+  passed_cases: number;
+  failed_cases: number;
+  blocked_cases: number;
+  current_case_id?: number | null;
+  current_case_title?: string | null;
+  started_at: string;
+  finished_at?: string | null;
+};
+
+export class ExecutionTaskRepository {
+  private readonly db: SqliteDb;
+
+  constructor(db: SqliteDb) {
     this.db = db;
   }
 
-  listTestSuites() {
+  listTestSuites(): TestSuiteRecord[] {
     return this.db.prepare(`
       SELECT
         ts.id,
@@ -33,10 +121,10 @@ export class ExecutionTaskRepository {
       LEFT JOIN test_suite_cases tsc ON tsc.suite_id = ts.id
       GROUP BY ts.id
       ORDER BY ts.created_at DESC
-    `).all();
+    `).all() as TestSuiteRecord[];
   }
 
-  listExecutionTasks() {
+  listExecutionTasks(): ExecutionTaskRecord[] {
     return this.db.prepare(`
       SELECT
         et.*,
@@ -53,14 +141,14 @@ export class ExecutionTaskRepository {
         CASE WHEN et.status IN ('RUNNING', 'PENDING') THEN 0 ELSE 1 END,
         et.started_at DESC
       LIMIT 50
-    `).all();
+    `).all() as ExecutionTaskRecord[];
   }
 
-  getExecutionTaskById(taskId: number) {
-    return this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId);
+  getExecutionTaskById(taskId: number): ExecutionTaskRecord | undefined {
+    return this.db.prepare("SELECT * FROM execution_tasks WHERE id = ?").get(taskId) as ExecutionTaskRecord | undefined;
   }
 
-  getExecutionTaskDetailMeta(taskId: number) {
+  getExecutionTaskDetailMeta(taskId: number): ExecutionTaskRecord | undefined {
     return this.db.prepare(`
       SELECT
         et.*,
@@ -74,10 +162,10 @@ export class ExecutionTaskRepository {
       LEFT JOIN test_cases current_tc ON current_tc.id = et.current_test_case_id
       LEFT JOIN assets a ON a.id = et.asset_id
       WHERE et.id = ?
-    `).get(taskId);
+    `).get(taskId) as ExecutionTaskRecord | undefined;
   }
 
-  getExecutionTaskDetailItems(taskId: number) {
+  getExecutionTaskDetailItems(taskId: number): ExecutionTaskDetailItemRecord[] {
     return this.db.prepare(`
       SELECT
         eti.*,
@@ -101,10 +189,10 @@ export class ExecutionTaskRepository {
       LEFT JOIN test_runs tr ON tr.id = eti.run_id
       WHERE eti.task_id = ?
       ORDER BY eti.sort_order ASC, eti.id ASC
-    `).all(taskId);
+    `).all(taskId) as ExecutionTaskDetailItemRecord[];
   }
 
-  listSuiteRuns() {
+  listSuiteRuns(): SuiteRunRecord[] {
     return this.db.prepare(`
       SELECT
         et.id,
@@ -128,7 +216,7 @@ export class ExecutionTaskRepository {
         CASE WHEN et.status IN ('RUNNING', 'PENDING') THEN 0 ELSE 1 END,
         et.started_at DESC
       LIMIT 20
-    `).all();
+    `).all() as SuiteRunRecord[];
   }
 
   createExecutionTask(payload: CreateExecutionTaskRecord) {

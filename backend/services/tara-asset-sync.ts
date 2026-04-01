@@ -1,10 +1,4 @@
-type SqliteDb = {
-  prepare: (sql: string) => {
-    get: (...args: any[]) => any;
-    all: (...args: any[]) => any[];
-    run: (...args: any[]) => any;
-  };
-};
+import type { SqliteDb } from "../types";
 
 const parseIds = (rows: Array<{ requirement_id?: number }> | undefined) =>
   Array.from(

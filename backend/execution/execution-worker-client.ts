@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from "child_process";
-import type { WorkerRequest, WorkerResponse, WorkerStatePayload } from "./execution-worker-ipc";
+import type { WorkerEventPayload, WorkerRequest, WorkerResponse, WorkerResponseData, WorkerStatePayload } from "./execution-worker-ipc";
 
 type ExecutionWorkerClientOptions = {
   cwd: string;
-  onEvent?: (event: any) => void;
+  onEvent?: (event: WorkerEventPayload) => void;
   onReady?: () => void | Promise<void>;
   autoRestart?: boolean;
   restartDelayMs?: number;
@@ -11,7 +11,7 @@ type ExecutionWorkerClientOptions = {
 };
 
 type PendingRequest = {
-  resolve: (value: any) => void;
+  resolve: (value: WorkerResponseData) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
 };
@@ -24,7 +24,7 @@ type WorkerRequestPayload =
 
 export class ExecutionWorkerClient {
   private readonly cwd: string;
-  private readonly onEvent?: (event: any) => void;
+  private readonly onEvent?: (event: WorkerEventPayload) => void;
   private readonly onReady?: () => void | Promise<void>;
   private readonly autoRestart: boolean;
   private readonly restartDelayMs: number;
@@ -130,7 +130,7 @@ export class ExecutionWorkerClient {
     return (await this.request({ type: "state" })) as WorkerStatePayload;
   }
 
-  private async request(payload: WorkerRequestPayload) {
+  private async request(payload: WorkerRequestPayload): Promise<WorkerResponseData> {
     if (!this.child || !this.readyPromise) {
       await this.start();
     }
@@ -142,7 +142,7 @@ export class ExecutionWorkerClient {
     const requestId = `${Date.now()}-${++this.requestSeq}`;
     const message: WorkerRequest = { ...payload, requestId } as WorkerRequest;
 
-    return new Promise<any>((resolve, reject) => {
+    return new Promise<WorkerResponseData>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error(`Worker request timeout: ${payload.type}`));

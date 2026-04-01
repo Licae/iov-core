@@ -1,7 +1,8 @@
 import type { Express } from "express";
+import type { SqliteDb } from "../types";
 
 type AssetRoutesDeps = {
-  db: any;
+  db: SqliteDb;
   pingAddress: (address: string) => Promise<{ success: boolean; latency_ms?: number; output: string }>;
 };
 
@@ -157,4 +158,3 @@ export const registerAssetRoutes = (app: Express, deps: AssetRoutesDeps) => {
     res.json({ success: true });
   });
 };
-

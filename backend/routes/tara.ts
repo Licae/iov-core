@@ -6,9 +6,10 @@ import {
   markTaraChangeImpact,
   removeEntityReverificationTodos,
 } from "../services/traceability-governance";
+import type { SqliteDb } from "../types";
 
 type TaraRouteDeps = {
-  db: any;
+  db: SqliteDb;
 };
 
 type TaraDetailPayload = {
@@ -18,6 +19,13 @@ type TaraDetailPayload = {
   attackPath?: string;
   threatMethod?: string;
   damageMethod?: string;
+};
+
+type TaraItemRow = Record<string, unknown> & {
+  requirement_count?: number;
+  test_case_count?: number;
+  linked_requirement_ids?: string | null;
+  linked_test_case_ids?: string | null;
 };
 
 const parseIdArray = (value: unknown) =>
@@ -102,9 +110,9 @@ export const registerTaraRoutes = (app: Express, deps: TaraRouteDeps) => {
         ) AS linked_test_case_ids
       FROM tara_items t
       ORDER BY t.threat_key ASC, t.id ASC
-    `).all();
+    `).all() as TaraItemRow[];
 
-    const normalized = rows.map((row: any) => ({
+    const normalized = rows.map((row) => ({
       ...row,
       requirement_count: Number(row.requirement_count || 0),
       test_case_count: Number(row.test_case_count || 0),
